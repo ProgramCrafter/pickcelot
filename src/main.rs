@@ -32,9 +32,6 @@ end
 ";
 
 const LUA_CODE: &[u8] = "
--- Автор: qwertyMAN
--- Версия: 0.1 бета
-
 string.rep = function(s, n)
     if n == 0 then return '' end
     if n == 1 then return s end
@@ -61,11 +58,13 @@ local event = {
 }
 local term = {
     clear = function()
+        gpu.setBackground(0)
         local w, h = gpu.getResolution()
         local s = string.rep(' ', w)
         for i = 1, h, 1 do
             gpu.set(1, i, s, false)
         end
+        gpu.setForeground(0xFFFFFF)
     end
 }
 local os = {
@@ -74,168 +73,173 @@ local os = {
     end,
     time = function() return 1.0 end
 }
+local hologram
+hologram = {
+    palette = {[0]={0,0,0}},
+    buffer = {},
+    history = {},
+    setPaletteColor = function(i, c)
+        hologram.palette[i] = {(c-(c%65536))/65536,
+                               ((c-(c%256))/256)%256, c%256}
+    end,
+    set = function(z, y, x, i)
+        local key = x*100+y
+        local power = 1/3 / (2^math.abs(z-11))
+        local c = hologram.palette[i] or {0xFF,0,0xFF}
+        local d = hologram.history[key*100+z] or {0,0,0}
+        if c == d then return end
+        hologram.history[key*100+z] = c
+        
+        if hologram.buffer[key]==nil then hologram.buffer[key]={0,0,0} end
+        local v = hologram.buffer[key]
+        
+        v[1] = v[1] + (c[1] - d[1]) * power
+        v[2] = v[2] + (c[2] - d[2]) * power
+        v[3] = v[3] + (c[3] - d[3]) * power
+        
+        local p,q,r = math.floor(v[1]),math.floor(v[2]),math.floor(v[3])
+        if p < 0 then p = 0 end
+        if q < 0 then q = 0 end
+        if r < 0 then r = 0 end
+        if p > 255 then p = 255 end
+        if q > 255 then q = 255 end
+        if r > 255 then r = 255 end
+        gpu.setBackground(p*65536+q*256+r)
+        gpu.set(x, y, ' ')
+    end,
+    clear = term.clear
+}
 
-local display			= {gpu.getResolution()}
-local players			= {}		-- свойства игроков
-local players_vector	= {}		-- направления игроков
-local area				= {}		-- игровое поле
-local turn				= {}		-- таблица поворота
-local target			= {}		-- координаты цели
-local border			= {0,0}		-- неиспользуемый отступ от края экрана
-local t					= 1/8		-- скорость игры
-local exit_game			= false		-- для выхода из игры
-local size				= {math.modf((display[1]-border[1])/2), math.modf(display[2]-border[2])} -- размер игрового поля
-math.randomseed(os.time())
 
-turn[1]={0,-1}
-turn[2]={0,1}
-turn[3]={-1,0}
-turn[4]={1,0}
-
-local command={}					-- управление:
-command[200]=function(nick)			-- вверх
-	if players_vector[nick] ~= 2 then
-		players_vector[nick] = 1
-	end
-end 
-command[208]=function(nick)			-- вниз
-	if players_vector[nick] ~= 1 then
-		players_vector[nick] = 2
-	end
+local c = 20
+--моделируем Снеговика
+local tSnowman = {10,10,11,11,11,12,12,12,12,11,11,11,10,9,8,7,6,7,8,8,9,9,9,9,9,8,8,7,6,7,6,6,6,6,6,6}
+--таблица падающих снежинок(Взаимствована у Doob, надеюсь он не против)
+local tSnow = {}
+for sn = 1, 32 do
+  tSnow[sn] = {}
 end
-command[203]=function(nick)			-- влево
-	if players_vector[nick] ~= 4 then
-		players_vector[nick] = 3
-	end
-end
-command[205]=function(nick)			-- вправо
-	if players_vector[nick] ~= 3 then
-		players_vector[nick] = 4
-	end
-end
+--палитра цветов
+hologram.setPaletteColor(1, 0xFFFFFF)--белый
+hologram.setPaletteColor(2, 0x8B0000)--бардовый
+hologram.setPaletteColor(3, 0xFFA500)--оранжевый
 
--- генерация поля
-for i=1, size[1] do
-	area[i]={}
-	for j=1, size[2] do
-		area[i][j]=false
-	end
+--цикл рисования круга так же взаимствован у Doob
+local function circle(x0, y, z0, R, i)
+  local x = R
+  local z = 0
+  local err = -R
+  while z <= x do
+    hologram.set(x + x0, y, z+z0, i)
+    hologram.set(z + x0, y, x + z0, i)
+    hologram.set(-x + x0, y, z + z0, i)
+    hologram.set(-z + x0, y, x + z0, i)
+    hologram.set(-x + x0, y, -z + z0, i)
+    hologram.set(-z + x0, y, -x + z0, i)
+    hologram.set(x + x0, y, -z + z0, i)
+    hologram.set(z + x0, y, -x + z0, i)
+    z = z+1
+    if err <= 0 then
+      err = err + (2 * z + 1)
+    else
+      x = x - 1
+      err = err + (2 * (z - x) + 1)
+    end
+  end
 end
-
-local function conv_cord(sx,sy)
-	return sx*2-1+border[1], sy+border[2]
+--рисуем пуговицы они же глаза
+local function stud(x, y0, z0, i)
+  for y = 0, 1 do
+    for z = 0, 1 do
+      hologram.set(x, y0-y, z0-z, i)
+    end
+  end
 end
+-- рисуем снеговика
+local function snowman()
+  for i = 1, 30 do
+    circle(c,i,c, tSnowman[i], 1)--отрисовываем основу снеговика
+  end
+  for i = 30, #tSnowman do
+    circle(c,i,c, tSnowman[i], 2)--рисуем шапку
+  end
+  --рисуем глаза
+  stud(29, 23, 23, 3)
+  stud(29, 23, 17, 3)
+  --рисуем морковку
+  for x = 1, 6  do
+    for y = 1, 2 do
+      for z = 1, 2 do
+        hologram.set(27+x, 18+z, 18+y, 3)
+      end
+    end
+  end
+  -- правая рука
+  for x = 1, 7 do
+    y = 3
+    hologram.set(20+y, 10+x, 10-x, 3)
+  end
+  -- левая рука
+  for x = 1, 7 do
+    y = 1
+    for y = 1, 3 do
+      y = y
+    end
+    hologram.set(20-y, 10+x, 31+x, 3)
+  end
+  --рисуем пуговицы
+  stud(30, 14, 20, 2)
+  stud(32, 10, 20, 2)
+  stud(32, 6, 20, 2)
 
-local function gen_target()
-	while true do
-		local x,y = math.random(1,size[1]), math.random(1,size[2])
-		if not area[x][y] then
-			target = {x,y}
-			gpu.setBackground(0x0000ff)
-			local rezerv = {conv_cord(x,y)}
-			gpu.set(rezerv[1], rezerv[2], '  ')
-			gpu.setBackground(0x000000)
-			break
-		end
-	end
-end
-
-local function keyboard(_,_,_,key,nick)
-	local swich = true
-	for i=1, #players do
-		if nick==players[i].name then
-			swich = false
-		end
-	end
-	if swich and (key==200 or key == 203 or key == 205 or key == 208) then
-		-- если игрока нет в списке
-		players[#players+1]={name=nick,number=5,cord={5,5}}
-		area[players[#players].cord[1]][players[#players].cord[2]]=players[#players].number
-	end
-	if key == 16 then -- выход
-		exit_game = true
-	elseif command[key] then
-		command[key](nick)
-	end
-end
-
-local function update()
-	-- проверка есть ли препятствие
-	for i=#players, 1, -1  do
-		local cord = turn[players_vector[players[i].name]]
-		local cord_2 = {players[i].cord[1]+cord[1],players[i].cord[2]+cord[2]}
-		gpu.setBackground(0xffffff)
-		local rezerv = {conv_cord(players[i].cord[1], players[i].cord[2])}
-		gpu.set(rezerv[1], rezerv[2], '  ')
-		gpu.setBackground(0x000000)
-		if cord_2[1]>size[1] then
-			cord_2[1] = 1
-		elseif cord_2[1] < 1 then
-			cord_2[1] = size[1]
-		elseif cord_2[2]>size[2] then
-			cord_2[2] = 1
-		elseif cord_2[2] < 1 then
-			cord_2[2] = size[2]
-		end
-		if not area[cord_2[1]][cord_2[2]] then
-			players[i].cord[1]=cord_2[1]
-			players[i].cord[2]=cord_2[2]
-			area[players[i].cord[1]][players[i].cord[2]]=players[i].number
-			gpu.setBackground(0x00ff00)
-			gpu.setForeground(0x000000)
-			local rezerv = {conv_cord(players[i].cord[1], players[i].cord[2])}
-			gpu.set(rezerv[1], rezerv[2], string.sub(players[i].name,1,2))
-			if target[1]==players[i].cord[1] and target[2]==players[i].cord[2] then
-				players[i].number = players[i].number+1
-				gen_target()
-			end
-		else
-			table.remove(players,i)
-		end
-		gpu.setBackground(0x000000)
-		gpu.setForeground(0xffffff)
-	end
-	
-	-- обновление и добавление ячеек
-	for i=1, size[1] do
-		for j=1, size[2] do
-			if area[i][j] then
-				if area[i][j]>0 then
-					area[i][j]=area[i][j]-1
-				else
-					area[i][j]=false
-					gpu.setBackground(0x000000)
-					local rezerv = {conv_cord(i,j)}
-					gpu.set(rezerv[1], rezerv[2], '  ')
-				end
-			end
-			
-		end
-	end
 end
 
--- очищаем экран
-gpu.setBackground(0x000000)
-gpu.setForeground(0xffffff)
-term.clear()
-event.listen('key_down', keyboard)
-
-gen_target()
-
--- тело игры
-while true do
-	os.sleep(t)
-	if exit_game then
-		term.clear()
-		print('Exit game')
-		os.sleep(2)
-		term.clear()
-		return
-	end
-	update()
+local function gen_snow() -- генерируем таблицу для источника снежинок(из кода Doob)
+  local tbl = {}
+  local x, y
+  for g = 1, 10 do
+    x, y = math.random(1, 46), math.random(1, 46)
+    if tbl[x] == nil then
+      tbl[x] = {}
+    end
+    tbl[x][y] = 1
+  end
+  return tbl
 end
 
-term.clear()
+local function falling_snow() -- слвигаем таблицы со снежинками вниз(Doob)
+  tmp = {}
+  for s = 1, 32 do
+    tmp[s] = {}
+    tmp[s] = tSnow[s+1]
+  end
+  tSnow = tmp
+  tSnow[32] = gen_snow()
+end
+ 
+local function animation(de) -- задаем указанное значение для снежинок(Doob)
+  for x = 1, 46 do
+    for z = 1, 46 do
+      for y = 1, 32 do
+        if tSnow[y][z] ~= nil then
+          if tSnow[y][z][x] == 1 then
+            hologram.set(x, y, z, de)
+          end
+        end
+      end
+    end
+  end
+end
+
+hologram.clear()
+
+while 1 do
+  snowman()
+  falling_snow()
+  animation(1)
+  os.sleep(2)
+  animation(0)
+end
 ".as_bytes();
 
 
@@ -500,7 +504,8 @@ impl eframe::App for App {
             self.peripheral.sleep = f64::NEG_INFINITY;
             
             let ex = ctx.fetch(&self.engine);
-            if ex.step(ctx, &mut Fuel::with(16384)) {
+            let mut fuel = Fuel::with(4096);
+            while ex.step(ctx, &mut fuel) {
                 let request = ex
                     .take_result::<UserData>(ctx)
                     .map(|ok_mode| ok_mode.map(
