@@ -78,14 +78,14 @@ local os = {
 }
 local hologram
 hologram = {
-    palette = {[0]={0,0,0}},
+    palette = {[0]={0,0,0},[3]={0,40,255}},
     buffer = {},
     history = {},
     setPaletteColor = function(i, c)
         hologram.palette[i] = {(c-(c%65536))/65536,
                                ((c-(c%256))/256)%256, c%256}
     end,
-    set = function(z, y, x, i)
+    set = function(x, y, z, i)
         local key = x*100+y
         local power = 1/3 / (2^math.abs(z-11))
         local c = hologram.palette[i] or {0xFF,0,0xFF}
@@ -115,196 +115,116 @@ hologram = {
 local computer = {}
 
 
-local function pullSignal(t)
-    os.sleep(t or 0.0)
-end
-
-local xor = function(u,v) return u ~ v end
-local abs=math.abs
-local cos=math.cos
-local sin=math.sin
-local char=function(c) return c > 32 and '.' or ' ' end
-local time, this_time = os.time, 0
-local center,max_x,max_y = 0, gpu.getResolution()
-local ys,xs = max_y*4, max_x*2
-local center_x=xs//2-2
-local center_y = ys//2-2
-
-local radius = ys//2-10
-local x,y=0,0
---опишем более быстрое однобитное ксорирование
-local reverse={} reverse[0]=1 reverse[1]=0
-local chars,screen={},{}
-local ch_y,ch_x = (max_y//1),(max_x//1)
-local xr,yr=0,0
-local mode='0'
-actions={}
-events = {key_up='keyUp'}
---chars init
-for y=1,ch_y do
-	chars[y]={}
-end
---screen init
-for y=1.0,ys do
-	screen[y]={}
-end
---перехват ивентов. надстройка над ОС
-function computer.pullSignal(...)
-    local e = {pullSignal(...)}
-       if events[e[1]] then
-           return actions[events[e[1]]](e)
-       end
-   return true --table.unpack(e) --true --table.unpack(e) 
-end
------------------------------------
-actions.t=function()
-    --tetminate
-    mode='terminate'
-    term.clear()
-    screen=nil
-    chars=nil
-    computer.pullSignal = pullSignal
-    evo=nil
-    return os.exit()
-end
-actions['1']=function()
- mode='0'
- return true
-end
-actions['2']=function()
-mode = '1'
-return true
-end
----------------------------------
-actions.keyUp=function(e)
-    local key=math.floor(e[3])
-    if key > 128 then
-        key = string.lower(ru_keys[key])
-    else
-        key=string.lower(string.char(key))
-    end
-    if actions[key] then
-        return actions[key](e)
-    end
-    return true
-end
+math.randomseed(44)
 
 
-local function cls_chr()
-    for y = 1,ch_y do 
-        for x = 1,ch_x do 
-            chars[y][x] = 0x2800
-        end
-    end 
+local args = {}
+
+local function add(mas,x,y,z,f) 
+	mas[x] = mas[x] or {} 
+	mas[x][y] = mas[x][y] or {} 
+	mas[x][y][z] = f
 end
 
-local function cls_scr()    
-	for y=1.0,ys do
-		for x=1.0,xs do
-			screen[y][x]=0
-		end
-	end
-end
+local h = {}
 
---опишем биткарту шрифта брайля
-local bits = {} 
-	bits[1]={1,8,2,16,4,32,64,128}
-	bits[0]={0,0,0,0,0,0,0,0}
-	bits[-1]={-1,-8,-2,-16,-4,-32,-64,-128}
---попробуем описать трансформацию значений массива в шрифт брайля
-local function toUnicode()
-  local ch_x,ch_y,yy,xx=0,0,0,0
-    for y in pairs(screen) do
-        ch_y=y+3  yy=y-1
-        ch_y=math.floor(ch_y/4)
-        for x in pairs(screen[y]) do
-          ch_x=x+1  xx=x-1
-            ch_x=math.floor(ch_x/2)
-            chars[ch_y][ch_x]=chars[ch_y][ch_x]+bits[screen[y][x]][1+(yy%4)*2+xx%2]
-        end
-    end
-    return true
-end
-
---отобразим содержимое экрана
-local function showMustGoOne()
-    for y in pairs(chars)do
-        show=''
-        
-        for x in pairs(chars[y])do
-            show = show..char(chars[y][x])
-        end
-        gpu.set(1,y+1,show)
-    end
-    return true
-end
-
-local function pseudo_draw(x1,y1,x,y)--вычисляет координаты точек линии
-	if x < x1 then x_step = -1 else x_step = 1 end
-	if y < y1 then y_step = -1 else y_step = 1 end
-
-	if abs(x-x1) > abs(y-y1) then
-		y_step=y_step*abs(y-y1)/abs(x-x1)
-		y_plot=y1
-		for x_plot = x1,x,x_step do
-			screen[center_y+y_plot//1+1][center_x+x_plot//1+1]=reverse[screen[center_y+y_plot//1+1][center_x+x_plot//1+1]]
-			y_plot=y_plot+y_step
-		end
-	else
-		x_step=x_step*abs(x-x1)/abs(y-y1)
-		x_plot=x1
-		for y_plot = y1,y,y_step do
-			screen[center_y+y_plot//1+1][center_x+x_plot//1+1]=reverse[screen[center_y+y_plot//1+1][center_x+x_plot//1+1]]
-			x_plot=x_plot+x_step
-		end
-	end
-end
-
-cls_scr() cls_chr()
-local x,y,a,angle,step,f,lines=0,0,0,0,17,2,0
-
-function main()
-	gpu.set(1,1,'Press key: (1) - mode 1, (2) - mode 2, (T) - for exit')
-while math.huge do
-	lines=512.0
-	while lines <= 888 do
-		this_time=time()/1000
-		if mode == '1' then 
-			xr=(this_time%(radius-radius/8))*cos(1.0/sin(this_time))--radius/2-4
-			yr=(this_time%(radius-radius/8))*sin(1.0/cos(this_time))--radius/2-4
-		else
-			xr=0
-			yr=0
-		end
-		angle=f*math.pi/lines
-		a= 0
-		for i = 1, lines do
-			if mode == '1' then 
-				xr=(this_time%(radius-radius/8))*cos(1.0/sin(this_time))
-				yr=(this_time%(radius-radius/8))*sin(1.0/cos(this_time))
-			else
-				xr=0
-				yr=0
+local function testLife(xx,yy,zz,jjj)
+	local life = 0
+	for x = xx-1, xx+1 do
+		for y = yy-1, yy+1, (x == xx and y == yy) and 2 or 1 do
+			for z = zz-1, zz+1, (x == xx and y == yy) and 2 or 1 do
+				if h[x] and h[x][y] and h[x][y][z] then life = life + 1 end
+				--hologram.set(x,y,z,jjj) os.sleep(0.3) -- < >
 			end
-			x=radius*cos(a)
-			y=radius*sin(a)
-			--pseudo_draw(center_x/2,center_y/2,x,y)
-			pseudo_draw(xr,yr,x,y)
-			a=a+angle
 		end
-
-		toUnicode()
-		showMustGoOne()
-		cls_scr()
-		cls_chr()
-		os.sleep((8001-lines)/40000)
-		os.sleep(0.3)
-		lines=lines+step
 	end
-	if step <60 then step=step+3 else step=33 end
+	return life
 end
+
+
+-- Set random pole
+
+for _ = 1,2500 do
+	add(h,math.random(8,40),math.random(8,24),math.random(8,40),true)
 end
-main()
+
+-- Set kub
+
+-- for x = 16-1, 16+1 do
+-- 	for y = 16-1, 16+1, (x == 16 or y == 16) and 2 or 1 do
+-- 		for z = 16-1, 16+1, (x == 16 or y == 16 or z == 16) and 2 or 1 do
+-- 			add(h,x,y,z,true)
+-- 		end
+-- 	end
+-- end
+
+
+
+hologram.clear()
+
+for x,yz in pairs(h) do
+	for y,zz in pairs(yz) do
+		for z,fl in pairs(zz) do
+			if fl then hologram.set(x,y,z,3) end
+		end
+	end
+end
+
+local rules = {}
+
+for i,v in pairs(args) do
+	rules[i] = args[i] and tonumber(args[i])
+end
+
+rules[1] = rules[1] or 5
+
+if not rules[2] then
+	rules[2] = 6
+	rules[3] = 7
+	rules[4] = 8
+end
+
+local function rulesValid(inPut)
+	local flag
+	for i = 2,4 do
+		if not rules[i] then break end
+		if inPut == rules[i] then flag = true end
+	end
+	return flag
+end
+
+
+while true do
+
+	os.sleep(0.4)
+
+	local newH, noValid = {}, {}
+	for xx,vYZ in pairs(h) do
+		for yy,vZ in pairs(vYZ) do
+			for zz,out in pairs(vZ) do
+
+
+				local test = testLife(xx,yy,zz,1)
+				if rulesValid(test) then add(newH,xx,yy,zz,true) else hologram.set(xx,yy,zz,0) end
+				
+				for x = xx-1, xx+1 do
+					for y = yy-1, yy+1, (x == xx and y == yy) and 2 or 1 do
+						for z = zz-1, zz+1, (x == xx and y == yy) and 2 or 1 do
+							if ( not (noValid[x] and noValid[x][y] and noValid[x][y][z]) ) and ( not (newH[x] and newH[x][y] and newH[x][y][z]) ) and (not(h[x] and h[x][y] and h[x][y][z])) and testLife(x,y,z,3) == rules[1] then 
+								add(newH,x,y,z,true) hologram.set(x,y,z,3) 
+							else 
+								add(noValid,x,y,z,true) 
+							end
+						end
+					end
+				end
+
+
+			end
+		end
+	end
+	h = newH
+end
 ".as_bytes();
 
 
