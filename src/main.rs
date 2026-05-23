@@ -45,7 +45,9 @@ local gpu = {
         if d == nil then d = false end
         return piccolo_component_invoke('$gpu', 'gpu.set', x, y, s, d)
     end,
-    getResolution = function() return 90, 35 end,
+    getResolution = function()
+        return piccolo_component_invoke('$gpu', 'gpu.getResolution')
+    end,
     setBackground = function(c)
         return piccolo_component_invoke('$gpu', 'gpu.setBackground', c)
     end,
@@ -128,6 +130,8 @@ local center = 21.5
 local amplitude = 11
 local frequency = 3  -- waves across the width
 
+local w, h = gpu.getResolution()
+
 gpu.setBackground(0)
 
 -- Main animation loop
@@ -135,8 +139,8 @@ while true do
     -- Clear the whole screen column by column using vertical space strings
     gpu.setForeground(0xFFFFFF)
     --[[
-    for y = 1, 35 do
-        gpu.set(1, y, string.rep(' ', 90))  -- vertical placement, clears column
+    for y = 1, h do
+        gpu.set(1, y, string.rep(' ', w))  -- vertical placement, clears column
     end
     --]]
 
@@ -145,16 +149,16 @@ while true do
     gpu.set(15, 3, 'place_vertically=true for bars, nil here')
 
     -- Draw waveform bars with vertical text + point markers
-    for x = 1, 90 do
-        local wave = center + amplitude * math.sin((x / 90) * 2 * math.pi * frequency + phase)
+    for x = 1, w do
+        local wave = center + amplitude * math.sin((x / w) * 2 * math.pi * frequency + phase)
         local y_wave = math.floor(wave + 0.5)
         if y_wave < 1 then y_wave = 1
-        elseif y_wave > 35 then y_wave = 35 end
+        elseif y_wave > h then y_wave = h end
 
         -- Dynamic colour based on bar height (blue -> red)
-        local r = math.floor(255 * (y_wave / 35) ^ 0.5)
+        local r = math.floor(255 * (y_wave / h) ^ 0.5)
         local g = math.floor(255 * math.max(0, y_wave - 29) / 12)
-        local b = math.floor(255 * (1 - y_wave / 35) ^ 0.5)
+        local b = math.floor(255 * (1 - y_wave / h) ^ 0.5)
         local color = r * 65536 + g * 256 + b
 
         gpu.setForeground(color)
@@ -273,7 +277,7 @@ impl ComponentInvoke {
     ) -> Result<(), piccolo::TypeError> {
         use piccolo::*;
         use std::string::String;
-        type Manyval<'gc> = Variadic<Vec<Value<'gc>>>;
+        type Manyval<'gc> = piccolo::Variadic<Vec<piccolo::Value<'gc>>>;
         
         let args: Result<(String,String,Manyval), _> = stack.consume(ctx);
         let (address, method, variadic_ref) = args?;
@@ -289,6 +293,27 @@ impl ComponentInvoke {
         stack.replace(ctx, ud);
         
         Ok(())
+    }
+    
+    #[must_use]
+    fn stash_vec<'gc>(
+        ctx: piccolo::Context<'gc>,
+        results: LuaList,
+    ) -> piccolo::Variadic<Vec<piccolo::Value<'gc>>> {
+        use piccolo::*;
+        
+        Variadic(results
+            .into_iter()
+            .map(|c| match c {
+                Constant::String(s) => Value::String(
+                    String::from_buffer(&ctx, s)
+                ),
+                Constant::Boolean(b) => Value::Boolean(b),
+                Constant::Integer(i) => Value::Integer(i),
+                Constant::Number(n) => Value::Number(n),
+                Constant::Nil => Value::Nil,
+            })
+            .collect())
     }
 }
 
@@ -392,6 +417,19 @@ impl Default for App {
         );
         
         components.insert(
+            ("$gpu".to_owned(), "gpu.getResolution".to_owned()),
+            |p: &mut Peripherals, args: &LuaList| -> InvResult {
+                let [] = args.as_array().ok_or_else(|| anyhow::anyhow!("wrong number of arguments passed: 0 expected"))?;
+                
+                let _screen: &screen::Screen<90, 35> = &p.screen;
+                Ok(vec![
+                    piccolo::Constant::Integer(90),
+                    piccolo::Constant::Integer(35),
+                ])
+            } as _
+        );
+        
+        components.insert(
             ("$gpu".to_owned(), "gpu.setForeground".to_owned()),
             |p: &mut Peripherals, args: &LuaList| -> InvResult {
                 let [color] = args.as_array().ok_or_else(|| anyhow::anyhow!("wrong number of arguments passed: 1 expected"))?;
@@ -470,9 +508,11 @@ impl eframe::App for App {
                 
                 invocations += 1;
                 
-                if let Some(cb) = self.components.get(&iv.target)
-                    && (cb)(&mut self.peripheral, &iv.variadic).is_ok() {
-                    ex.resume(ctx, ()).expect("yielded, cb complete");
+                if let Some(cb) = self.components.get(&iv.target) {
+                    match (cb)(&mut self.peripheral, &iv.variadic) {
+                        Ok(v) => ex.resume(ctx, ComponentInvoke::stash_vec(ctx, v)),
+                        Err(e) => ex.resume_err(&ctx, e.into()),
+                    }.expect("resuming should work because callback can return");
                     
                     if self.peripheral.sleep > self.peripheral.timer {
                         break;
