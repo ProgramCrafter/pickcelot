@@ -2282,6 +2282,7 @@ dependencies = [
 name = "pickcelot"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "eframe",
  "egui",
  "piccolo",

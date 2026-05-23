@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use egui::*;
 
 
@@ -192,10 +192,6 @@ mod screen {
         pub chars: Box<[[ScreenChar; W]; H]>,
     }
     
-    impl<const W: usize, const H: usize> Default for Screen<W, H> {
-        fn default() -> Self { Self::new() }
-    }
-    
     impl<const W: usize, const H: usize> Screen<W, H> {
         fn new() -> Self {
             Self {
@@ -209,6 +205,26 @@ mod screen {
                 }
             }
         }
+        
+        pub fn put(&mut self, c: char, colors: (Color32, Color32),
+                   location: &mut (i64, i64), carriage_vertical: bool) {
+            let (ix, iy) = *location;
+            if let Ok(y) = usize::try_from(iy) && y < H
+            && let Ok(x) = usize::try_from(ix) && x < W {
+                self.chars[y][x] = (c, colors.0, colors.1);
+            }
+            
+            if carriage_vertical {
+                location.1 = iy.saturating_add(1);
+            } else {
+                let char_width = if c.is_control() { 0 } else { 1 };
+                location.0 = ix.saturating_add(char_width);
+            }
+        }
+    }
+    
+    impl<const W: usize, const H: usize> Default for Screen<W, H> {
+        fn default() -> Self { Self::new() }
     }
     
     impl<'a, const W: usize, const H: usize> Widget for &'a Screen<W, H> {
@@ -242,10 +258,12 @@ mod screen {
 }
 
 
-type InvocationVariadic = Vec<piccolo::Constant<Box<[u8]>>>;
+type Constant = piccolo::Constant<Box<[u8]>>;
+type LuaList = Vec<Constant>;
+type InvResult = Result<LuaList, anyhow::Error>;
 struct ComponentInvoke {
     target:   (String, String),
-    variadic: InvocationVariadic,
+    variadic: LuaList,
 }
 impl ComponentInvoke {
     #[must_use]
@@ -274,6 +292,29 @@ impl ComponentInvoke {
     }
 }
 
+fn ld_int(v: &Constant) -> Result<i64, anyhow::Error> {
+    match v {
+        Constant::Integer(n) => Ok(*n),
+        Constant::Number(n)  => Ok(n.trunc() as i64),
+        _ => Err(anyhow::anyhow!("expected integer/number value")),
+    }
+}
+fn ld_bool(v: &Constant) -> Result<bool, anyhow::Error> {
+    match v {
+        Constant::Boolean(b) => Ok(*b),
+        _ => Err(anyhow::anyhow!("expected boolean value")),
+    }
+}
+fn ld_str(v: &Constant) -> Result<&str, anyhow::Error> {
+    match v {
+        Constant::String(s) => Ok(str::from_utf8(s)?),
+        _ => Err(anyhow::anyhow!("expected string value")),
+    }
+}
+fn asize() -> anyhow::Error {
+    anyhow::anyhow!("wrong number of arguments passed")
+}
+
 
 
 struct Peripherals {
@@ -289,7 +330,7 @@ struct App {
     
     peripheral: Peripherals,
     components: HashMap<(String, String),
-        fn(&mut Peripherals, &InvocationVariadic) -> bool>,
+        fn(&mut Peripherals, &LuaList) -> InvResult>,
 }
 
 impl Default for App {
@@ -330,93 +371,60 @@ impl Default for App {
         // 3. Callbacks for peripherals.
         
         let mut components = HashMap::new();
-        components.insert(("$gpu".to_owned(), "gpu.set".to_owned()),
-        |p: &mut Peripherals, args: &InvocationVariadic| -> bool {
-            use piccolo::Constant::*;
-            
-            let (cx, cy, cs, cd) = match &args[..] {
-                [cx, cy, cs, cd] => (cx, cy, cs, cd),
-                _                => return false,
-            };
-            
-            let x = match cx {
-                Integer(n) => *n,
-                Number(n)  => n.trunc() as i64,
-                _          => return false,
-            };
-            let y = match cy {
-                Integer(n) => *n,
-                Number(n)  => n.trunc() as i64,
-                _          => return false,
-            };
-            let s = match cs {
-                String(s)  => s,
-                _          => return false,
-            };
-            let d = match cd {
-                Boolean(d) => *d,
-                _          => return false,
-            };
-            
-            let Ok(x) = usize::try_from(x - 1) else {return false};
-            let Ok(y) = usize::try_from(y - 1) else {return false};
-            let Ok(s) = str::from_utf8(&s) else {return false};
-            
-            let gpu_config = p.gpu;
-            
-            for (i, c) in s.chars().enumerate() {
-                let (char_x, char_y) = match d {
-                    false => (x.saturating_add(i), y),
-                    true  => (x, y.saturating_add(i)),
-                };
-                if let Some(row) = p.screen.chars.get_mut(char_y) {
-                    if let Some(col) = row.get_mut(char_x) {
-                        *col = (c, gpu_config.0, gpu_config.1);
+        components.insert(
+            ("$gpu".to_owned(), "gpu.set".to_owned()),
+            |p: &mut Peripherals, args: &LuaList| -> InvResult {
+                let [cx, cy, cs, cd] = args.as_array().ok_or_else(asize)?;
+                let mut pos = (ld_int(cx)?.saturating_sub(1),
+                               ld_int(cy)?.saturating_sub(1));
+                let d = ld_bool(cd)?;
+                
+                if let Ok(one_char) = ld_int(cs) {
+                    let c = char::try_from(u32::try_from(one_char)?)?;
+                    p.screen.put(c, p.gpu, &mut pos, d);
+                } else {
+                    for c in ld_str(cs)?.chars() {
+                        p.screen.put(c, p.gpu, &mut pos, d);
                     }
                 }
-            }
-            
-            true
-        } as _);
-        components.insert(("$gpu".to_owned(), "gpu.setForeground".to_owned()),
-        |p: &mut Peripherals, args: &InvocationVariadic| -> bool {
-            let Some(t) = (match &args[..] {
-                [ct] => ct.to_integer(),
-                _    => return false,
-            }) else {return false};
-            
-            let (b, rg) = (t % 256, t / 256);
-            let (g, r) = (rg % 256, rg / 256);
-            
-            p.gpu.0 = Color32::from_rgb(r as u8, g as u8, b as u8);
-            
-            true
-        } as _);
-        components.insert(("$gpu".to_owned(), "gpu.setBackground".to_owned()),
-        |p: &mut Peripherals, args: &InvocationVariadic| -> bool {
-            let Some(t) = (match &args[..] {
-                [ct] => ct.to_integer(),
-                _    => return false,
-            }) else {return false};
-            
-            let (b, rg) = (t % 256, t / 256);
-            let (g, r) = (rg % 256, rg / 256);
-            
-            p.gpu.1 = Color32::from_rgb(r as u8, g as u8, b as u8);
-            
-            true
-        } as _);
-        components.insert(("$os".to_owned(), "os.sleep".to_owned()),
-        |p: &mut Peripherals, args: &InvocationVariadic| -> bool {
-            let Some(t) = (match &args[..] {
-                [ct] => ct.to_number(),
-                _    => return false,
-            }) else {return false};
-            
-            p.sleep = p.timer + t;
-            
-            true
-        } as _);
+                Ok(vec![])
+            } as _
+        );
+        
+        components.insert(
+            ("$gpu".to_owned(), "gpu.setForeground".to_owned()),
+            |p: &mut Peripherals, args: &LuaList| -> InvResult {
+                let [color] = args.as_array().ok_or_else(|| anyhow::anyhow!("wrong number of arguments passed: 1 expected"))?;
+                let color = color.to_integer().ok_or_else(|| anyhow::anyhow!("int conversion failed"))?;
+                let r = u8::try_from(color / 65536)?;
+                let g = u8::try_from((color % 65536) / 256)?;
+                let b = u8::try_from(color % 256)?;
+                p.gpu.0 = Color32::from_rgb(r, g, b);
+                Ok(vec![])
+            } as _
+        );
+        
+        components.insert(
+            ("$gpu".to_owned(), "gpu.setBackground".to_owned()),
+            |p: &mut Peripherals, args: &LuaList| -> InvResult {
+                let [color] = args.as_array().ok_or_else(|| anyhow::anyhow!("wrong number of arguments passed: 1 expected"))?;
+                let color = color.to_integer().ok_or_else(|| anyhow::anyhow!("int conversion failed"))?;
+                let r = u8::try_from(color / 65536)?;
+                let g = u8::try_from((color % 65536) / 256)?;
+                let b = u8::try_from(color % 256)?;
+                p.gpu.1 = Color32::from_rgb(r, g, b);
+                Ok(vec![])
+            } as _
+        );
+        
+        components.insert(
+            ("$os".to_owned(), "os.sleep".to_owned()),
+            |p: &mut Peripherals, args: &LuaList| -> InvResult {
+                let [time] = args.as_array().ok_or_else(|| anyhow::anyhow!("wrong number of arguments passed: 1 expected"))?;
+                p.sleep = p.timer + time.to_number().ok_or_else(|| anyhow::anyhow!("number conversion failed"))?;
+                Ok(vec![])
+            } as _
+        );
         
         
         Self {
@@ -463,7 +471,7 @@ impl eframe::App for App {
                 invocations += 1;
                 
                 if let Some(cb) = self.components.get(&iv.target)
-                    && (cb)(&mut self.peripheral, &iv.variadic) {
+                    && (cb)(&mut self.peripheral, &iv.variadic).is_ok() {
                     ex.resume(ctx, ()).expect("yielded, cb complete");
                     
                     if self.peripheral.sleep > self.peripheral.timer {
