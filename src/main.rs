@@ -115,115 +115,69 @@ hologram = {
 local computer = {}
 
 
-math.randomseed(44)
+-- GPU Waveform Demo
+-- Tests gpu.set, gpu.setBackground, gpu.setForeground with different parameters
+-- Y axis runs down, screen size 90x35 characters
 
+-- Pre-build fixed strings to avoid string.rep (only string.sub allowed)
+local SPACE35 = '                                   '  -- 35 spaces
+local PIPE35  = '|||||||||||||||||||||||||||||||||||'  -- 35 pipes
 
-local args = {}
+local phase = 0
+local center = 21.5
+local amplitude = 11
+local frequency = 3  -- waves across the width
 
-local function add(mas,x,y,z,f) 
-	mas[x] = mas[x] or {} 
-	mas[x][y] = mas[x][y] or {} 
-	mas[x][y][z] = f
-end
+gpu.setBackground(0)
 
-local h = {}
-
-local function testLife(xx,yy,zz,jjj)
-	local life = 0
-	for x = xx-1, xx+1 do
-		for y = yy-1, yy+1, (x == xx and y == yy) and 2 or 1 do
-			for z = zz-1, zz+1, (x == xx and y == yy) and 2 or 1 do
-				if h[x] and h[x][y] and h[x][y][z] then life = life + 1 end
-				--hologram.set(x,y,z,jjj) os.sleep(0.3) -- < >
-			end
-		end
-	end
-	return life
-end
-
-
--- Set random pole
-
-for _ = 1,2500 do
-	add(h,math.random(8,40),math.random(8,24),math.random(8,40),true)
-end
-
--- Set kub
-
--- for x = 16-1, 16+1 do
--- 	for y = 16-1, 16+1, (x == 16 or y == 16) and 2 or 1 do
--- 		for z = 16-1, 16+1, (x == 16 or y == 16 or z == 16) and 2 or 1 do
--- 			add(h,x,y,z,true)
--- 		end
--- 	end
--- end
-
-
-
-hologram.clear()
-
-for x,yz in pairs(h) do
-	for y,zz in pairs(yz) do
-		for z,fl in pairs(zz) do
-			if fl then hologram.set(x,y,z,3) end
-		end
-	end
-end
-
-local rules = {}
-
-for i,v in pairs(args) do
-	rules[i] = args[i] and tonumber(args[i])
-end
-
-rules[1] = rules[1] or 5
-
-if not rules[2] then
-	rules[2] = 6
-	rules[3] = 7
-	rules[4] = 8
-end
-
-local function rulesValid(inPut)
-	local flag
-	for i = 2,4 do
-		if not rules[i] then break end
-		if inPut == rules[i] then flag = true end
-	end
-	return flag
-end
-
-
+-- Main animation loop
 while true do
+    -- Clear the whole screen column by column using vertical space strings
+    gpu.setForeground(0xFFFFFF)
+    --[[
+    for y = 1, 35 do
+        gpu.set(1, y, string.rep(' ', 90))  -- vertical placement, clears column
+    end
+    --]]
 
-	os.sleep(0.4)
+    -- Draw title (horizontal placement)
+    gpu.set(25, 1, 'GPU Waveform Demo', true)
+    gpu.set(15, 3, 'place_vertically=true for bars, nil here')
 
-	local newH, noValid = {}, {}
-	for xx,vYZ in pairs(h) do
-		for yy,vZ in pairs(vYZ) do
-			for zz,out in pairs(vZ) do
+    -- Draw waveform bars with vertical text + point markers
+    for x = 1, 90 do
+        local wave = center + amplitude * math.sin((x / 90) * 2 * math.pi * frequency + phase)
+        local y_wave = math.floor(wave + 0.5)
+        if y_wave < 1 then y_wave = 1
+        elseif y_wave > 35 then y_wave = 35 end
 
+        -- Dynamic colour based on bar height (blue -> red)
+        local r = math.floor(255 * (y_wave / 35) ^ 0.5)
+        local g = math.floor(255 * math.max(0, y_wave - 29) / 12)
+        local b = math.floor(255 * (1 - y_wave / 35) ^ 0.5)
+        local color = r * 65536 + g * 256 + b
 
-				local test = testLife(xx,yy,zz,1)
-				if rulesValid(test) then add(newH,xx,yy,zz,true) else hologram.set(xx,yy,zz,0) end
-				
-				for x = xx-1, xx+1 do
-					for y = yy-1, yy+1, (x == xx and y == yy) and 2 or 1 do
-						for z = zz-1, zz+1, (x == xx and y == yy) and 2 or 1 do
-							if ( not (noValid[x] and noValid[x][y] and noValid[x][y][z]) ) and ( not (newH[x] and newH[x][y] and newH[x][y][z]) ) and (not(h[x] and h[x][y] and h[x][y][z])) and testLife(x,y,z,3) == rules[1] then 
-								add(newH,x,y,z,true) hologram.set(x,y,z,3) 
-							else 
-								add(noValid,x,y,z,true) 
-							end
-						end
-					end
-				end
+        gpu.setForeground(color)
 
+        -- Vertical bar using place_vertically = true
+        -- Height = y_wave, starts at row 1, goes downwards
+        local bar = string.sub(PIPE35, 1, y_wave)
+        local ter = string.sub(SPACE35, 1, amplitude + center + 0.5 - y_wave)
+        gpu.set(x, 1, bar .. ter, true)
 
-			end
-		end
-	end
-	h = newH
+        -- Overlay the actual wave point as a solid block (horizontal placement)
+        gpu.setForeground(0x24 * 0x010101)
+        gpu.set(x, y_wave, '█', false)
+    end
+
+    -- Add a moving horizontal label at the bottom to test horizontal placement again
+    gpu.setForeground(0xFFFF00)
+    local label = ' Phase: ' .. tostring(phase) .. '   '
+    local labelX = math.floor(45 + 20 * math.sin(phase * 0.7))
+    gpu.set(labelX, 34, label, false)
+
+    os.sleep(0.07)
+    phase = phase + 0.0625
 end
 ".as_bytes();
 
@@ -478,6 +432,8 @@ impl eframe::App for App {
     fn update(&mut self, ectx: &Context, _frame: &mut eframe::Frame) {
         self.peripheral.timer = ectx.input(|i| i.time);
         
+        let mut invocations = 0;
+        
         self.config.enter(|ctx| {
             use piccolo::*;
             
@@ -489,7 +445,7 @@ impl eframe::App for App {
             self.peripheral.sleep = f64::NEG_INFINITY;
             
             let ex = ctx.fetch(&self.engine);
-            let mut fuel = Fuel::with(40960);
+            let mut fuel = Fuel::with(4096 * 30);
             while ex.step(ctx, &mut fuel) {
                 let request = ex
                     .take_result::<UserData>(ctx)
@@ -504,9 +460,15 @@ impl eframe::App for App {
                     Ok(Ok(Ok(iv))) => iv,
                 };
                 
+                invocations += 1;
+                
                 if let Some(cb) = self.components.get(&iv.target)
                     && (cb)(&mut self.peripheral, &iv.variadic) {
                     ex.resume(ctx, ()).expect("yielded, cb complete");
+                    
+                    if self.peripheral.sleep > self.peripheral.timer {
+                        break;
+                    }
                 } else {
                     let s = String::from_slice(&ctx, "bad invocation");
                     let e = Error::from_value(s.into());
@@ -523,6 +485,13 @@ impl eframe::App for App {
             .frame(Frame::new().inner_margin(PADDING))
             .show(ectx, |ui| {
                 ui.add(&self.peripheral.screen);
+                ui.add_space(PADDING);
+                
+                if invocations != 0 {
+                    ui.label(format!("component.invoke(): {invocations}"));
+                } else {
+                    ui.label("component.invoke(): ___");
+                }
             });
     }
 }
