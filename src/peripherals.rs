@@ -184,7 +184,7 @@ pub fn build_reactions() -> Reactions {
         |p: &mut Peripherals, args: &LuaList| -> InvResult {
             read_or_bail!([] = args);
             p.ores.robot_dir.turn_around();
-            p.require_pause(0.03);
+            // p.require_pause(0.03);
             Ok(vec![ Constant::Boolean(true) ])
         } as _
     );

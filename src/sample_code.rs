@@ -101,403 +101,781 @@ do_init = function()
     print = function(s)
         print_y = print_y + 1
         if print_y > print_h then print_y = 1 end
-        piccolo_component_invoke('$gpu', 'gpu.set', 1, print_y, s .. s80, false)
+        piccolo_component_invoke('$gpu', 'gpu.set', 1, print_y, tostring(s) .. s80, false)
     end
     
     tonumber = tonumber or function() return nil end
+    
+    string.format = function(...)
+        local a = {...}
+        local b = {}
+        for k, v in pairs(a) do b[k] = tostring(v) end
+        return table.concat(b, ' \t')
+    end
+    
+    robot.turnLeft()
     
     do_init = nil
 end
 do_init()
 
--- Totoro Recursive Miner  0.5H --
--- computercraft.ru (c) 01.2015 --
-local robot = require('robot')
-local event = require('event')
-local sides = require('sides')
-local computer = require('computer')
-local com = require('component')
 
-function trytoload(name)
-  if com.isAvailable(name) then
-    return com.getPrimary(name)
-  else
-    return nil
-  end
+
+
+-- ============================================================================
+-- Exhaustive OpenComputers ore miner
+--
+-- The robot explores the reachable connected region using iterative DFS.
+--
+-- Block classification follows the supplied polyfill:
+--   detect() == false                  -> air
+--   detect() == true and compare()    -> trash
+--   detect() == true and compare()==false -> valuable or unbreakable
+--
+-- Coordinates:
+--   x: horizontal axis
+--   y: vertical axis
+--   z: horizontal axis
+--
+-- Headings:
+--   0 = +x
+--   1 = +z
+--   2 = -x
+--   3 = -z
+-- ============================================================================
+
+local robot = require("robot")
+local computer = require("computer")
+
+-- ============================================================================
+-- Constants
+-- ============================================================================
+
+local COLOR_NORMAL = 0x00FF00
+local COLOR_MOVE = 0xFFFF00
+local COLOR_HAZARD = 0xFF0000
+local COLOR_RETURN = 0x0000FF
+local COLOR_IDLE = 0x888888
+
+local BLOCK_UNKNOWN = 0
+local BLOCK_AIR = 1
+local BLOCK_TRASH = 2
+local BLOCK_VALUABLE = 3
+local BLOCK_UNBREAKABLE = 4
+
+local MAX_SWINGS_PER_TARGET = 64
+local MAX_MOVE_ATTEMPTS = 3
+local MIN_ENERGY_RATIO = 0.15
+
+-- ============================================================================
+-- Direction data
+-- ============================================================================
+
+local headingVector = {
+    [0] = { dx = 1, dz = 0 },
+    [1] = { dx = 0, dz = 1 },
+    [2] = { dx = -1, dz = 0 },
+    [3] = { dx = 0, dz = -1 }
+}
+
+local horizontalDirections = { 0, 1, 2, 3 }
+
+local allDirections = {
+    "up",
+    "down",
+    0,
+    1,
+    2,
+    3
+}
+
+-- ============================================================================
+-- State
+-- ============================================================================
+
+local state = {
+    x = 0,
+    y = 0,
+    z = 0,
+    heading = 0,
+
+    -- known[key] = block type
+    known = {},
+
+    -- knownList avoids parsing coordinate keys.
+    knownList = {},
+
+    -- visited[key] = true for positions actually entered.
+    visited = {},
+
+    -- impassableEdges[key] = true for failed movements.
+    impassableEdges = {},
+
+    oresMined = 0,
+    trashBroken = 0,
+    failedTargets = 0,
+
+    stopReason = nil
+}
+
+-- ============================================================================
+-- Coordinate helpers
+-- ============================================================================
+
+local function coordinateKey(x, y, z)
+    return x .. "," .. y .. "," .. z
 end
 
-local gen = trytoload("generator")
-local cloader = trytoload("chunkloader")
-
-TECH_SLOTS = 3
-VANILLA_CHEST = true
-PATHWAYS = false
-DROP_TRASH = false
-DEAD_END = 30
-USE_CLOADER = true
-
-INV_SIZE = robot.inventorySize()
-if VANILLA_CHEST then INV_SIZE = math.min(INV_SIZE, TECH_SLOTS + 27) end
-MAX = 1024
-
--- statictics
-local moves = 0
-
-local light_allowed = (robot.setLightColor ~= nil)
-local color = {}
-color.working = 0x00ff00
-color.idle = 0xff0000
-color.warning = 0xffff10
-
-local trash_slots = TECH_SLOTS - 1
-local chest_slot = TECH_SLOTS
-local empty_slot = TECH_SLOTS + 1
-
-local loc = {x=0, y=0, z=0, d=0}
-local lode = {}
-
-local a = {...}
-local l = tonumber(a[1]) or 22
-local w = tonumber(a[2]) or 17
-local comeback = a[3] or 'false'
-local halfw = math.floor(w/2)
-
-if a[1] == '?' or a[1] == '-h' or a[1] == '--help' then
-  print("Синтаксис: mine <length> [width] [comeback]")
-  return
-end
-if gen == nil then 
-  print([[[WARNING] Генератор не обнаружен!\n
-    Робот не проработает долго без подзарядки.]])
-end
-if cloader ~= nil then 
-  print([[[WARNING] Обнаружен чанклодер!\n
-    На сервере ComputerCraft IT 1.7.10 его использование 
-    приведет к моментальной разрядке батареи!]])
+local function edgeKey(x1, y1, z1, x2, y2, z2)
+    return x1 .. "," .. y1 .. "," .. z1
+        .. ">"
+        .. x2 .. "," .. y2 .. "," .. z2
 end
 
--- ============================= N A V I G A T I O N ============================= --
-function forward()
-  if robot.forward() then
-    if loc.d == 0 then loc.y = loc.y+1
-    elseif loc.d == 1 then loc.x = loc.x+1
-    elseif loc.d == 2 then loc.y = loc.y-1
-    else loc.x = loc.x-1 end
-    moves = moves + 1
-    return true
-  else
-    return false
-  end
-end
-function back()
-  if robot.back() then
-    if loc.d == 0 then loc.y = loc.y-1
-    elseif loc.d == 1 then loc.x = loc.x-1
-    elseif loc.d == 2 then loc.y = loc.y+1
-    else loc.x = loc.x+1 end
-    moves = moves + 1
-    return true
-  else
-    return false
-  end
-end
-function up()
-  if robot.up() then
-    loc.z = loc.z+1
-    moves = moves + 1
-    return true
-  else
-    return false
-  end
-end
-function down()
-  if robot.down() then
-    loc.z = loc.z-1
-    moves = moves + 1
-    return true
-  else
-    return false
-  end
-end
-function turnRight()
-  loc.d = (loc.d+1)%4
-  robot.turnRight()
-end
-function turnAround()
-  loc.d = (loc.d+2)%4
-  robot.turnAround()
-end
-function turnLeft()
-  loc.d = (loc.d+3)%4
-  robot.turnLeft()
+local function targetForDirection(x, y, z, direction)
+    if direction == "up" then
+        return x, y + 1, z
+    end
+
+    if direction == "down" then
+        return x, y - 1, z
+    end
+
+    local vector = headingVector[direction]
+    return x + vector.dx, y, z + vector.dz
 end
 
--- ========================== F U E L  C O N T R O L ============================= --
-function check_fuel()
-  if gen ~= nil then
-    if (computer.maxEnergy() - computer.energy()) > 1000 then
-      if gen.count() == 0 then
-        for i=empty_slot, INV_SIZE do
-          robot.select(i)
-          if gen.insert() then break end
+local function inverseDirection(direction)
+    if direction == "up" then
+        return "down"
+    end
+
+    if direction == "down" then
+        return "up"
+    end
+
+    return (direction + 2) % 4
+end
+
+-- ============================================================================
+-- Known-world registry
+-- ============================================================================
+
+local function recordBlock(x, y, z, blockType)
+    local key = coordinateKey(x, y, z)
+    local oldType = state.known[key]
+
+    if oldType == BLOCK_UNBREAKABLE then
+        return
+    end
+
+    if oldType == nil then
+        state.known[key] = blockType
+        state.knownList[#state.knownList + 1] = {
+            x = x,
+            y = y,
+            z = z,
+            key = key,
+            type = blockType
+        }
+        return
+    end
+
+    state.known[key] = blockType
+
+    for i = 1, #state.knownList do
+        local item = state.knownList[i]
+
+        if item.key == key then
+            item.type = blockType
+            return
         end
-      end
     end
-  end
 end
 
--- ========================== I T E M  C O N T R O L ============================= --
-function check_loot()
-  for i=empty_slot, INV_SIZE do
-    if robot.count(i) == 0 then return false end
-  end
-  return true
+local function recordCurrentPosition()
+    recordBlock(state.x, state.y, state.z, BLOCK_AIR)
 end
 
-function unload()
-  -- place for chest
-  robot.select(chest_slot)
-  while robot.swing() do end
-  robot.swingUp()
-  up()
-  while robot.swing() do end
-  down()
-  if robot.place() then
-    -- put items
-    for i=empty_slot, INV_SIZE do
-      robot.select(i)
-      while robot.drop() do end
+-- ============================================================================
+-- Energy and inventory checks
+-- ============================================================================
+
+local function energyIsLow()
+    local maximum = computer.maxEnergy()
+
+    if maximum <= 0 then
+        return false
     end
 
-    -- grab ender chest
-    if not VANILLA_CHEST then
-      robot.select(chest_slot)
-      robot.swing()
-    end
-  end
+    return computer.energy() / maximum < MIN_ENERGY_RATIO
 end
 
-function check_trash()
-  for i=1, trash_slots do
-    -- if too many trash of this type
-    if robot.space(i) == 0 then
-      -- drop all but one in trash slot
-      robot.select(i)
-      robot.dropDown(robot.count(i)-1)
-      -- and drop all others
-      for j=empty_slot, INV_SIZE do
-        if robot.compareTo(j) then
-          robot.select(j)
-          robot.dropDown()
-          robot.select(i)
+local function inventoryIsFull()
+    -- The supplied polyfill returns math.huge here.
+    local free = robot.space()
+    return free ~= nil and free <= 0
+end
+
+-- ============================================================================
+-- Turning
+-- ============================================================================
+
+local function turnRight()
+    local ok = robot.turnRight()
+
+    if ok then
+        state.heading = (state.heading + 1) % 4
+        return true
+    end
+
+    return false
+end
+
+local function turnLeft()
+    local ok = robot.turnLeft()
+
+    if ok then
+        state.heading = (state.heading + 3) % 4
+        return true
+    end
+
+    return false
+end
+
+local function turnAround()
+    local ok = robot.turnAround()
+
+    if ok then
+        state.heading = (state.heading + 2) % 4
+        return true
+    end
+
+    -- Fallback for implementations without hidden$turnaround.
+    local first = turnRight()
+    local second = false
+
+    if first then
+        second = turnRight()
+    end
+
+    return first and second
+end
+
+local function faceHeading(targetHeading)
+    local difference = (targetHeading - state.heading) % 4
+
+    if difference == 0 then
+        return true
+    end
+
+    if difference == 1 then
+        return turnRight()
+    end
+
+    if difference == 2 then
+        return turnAround()
+    end
+
+    return turnLeft()
+end
+
+-- ============================================================================
+-- Inspection
+-- ============================================================================
+
+local function classifyFront()
+    if not robot.detect() then
+        return BLOCK_AIR
+    end
+
+    if robot.compare() then
+        return BLOCK_TRASH
+    end
+
+    return BLOCK_VALUABLE
+end
+
+local function classifyUp()
+    if not robot.detectUp() then
+        return BLOCK_AIR
+    end
+
+    if robot.compareUp() then
+        return BLOCK_TRASH
+    end
+
+    return BLOCK_VALUABLE
+end
+
+local function classifyDown()
+    if not robot.detectDown() then
+        return BLOCK_AIR
+    end
+
+    if robot.compareDown() then
+        return BLOCK_TRASH
+    end
+
+    return BLOCK_VALUABLE
+end
+
+local function inspectDirection(direction)
+    if direction == "up" then
+        return classifyUp()
+    end
+
+    if direction == "down" then
+        return classifyDown()
+    end
+
+    if not faceHeading(direction) then
+        return BLOCK_UNKNOWN
+    end
+
+    return classifyFront()
+end
+
+local function inspectAndRecord(direction)
+    local x, y, z = targetForDirection(
+        state.x,
+        state.y,
+        state.z,
+        direction
+    )
+
+    local blockType = inspectDirection(direction)
+
+    if blockType ~= BLOCK_UNKNOWN then
+        recordBlock(x, y, z, blockType)
+    end
+
+    return blockType, x, y, z
+end
+
+-- ============================================================================
+-- Block breaking
+-- ============================================================================
+
+local function swingDirection(direction)
+    if direction == "up" then
+        return robot.swingUp()
+    end
+
+    if direction == "down" then
+        return robot.swingDown()
+    end
+
+    if not faceHeading(direction) then
+        return false, "cannot turn"
+    end
+
+    return robot.swing()
+end
+
+local function clearDirection(direction)
+    local x, y, z = targetForDirection(
+        state.x,
+        state.y,
+        state.z,
+        direction
+    )
+
+    local swings = 0
+
+    while swings < MAX_SWINGS_PER_TARGET do
+        local blockType = inspectDirection(direction)
+
+        if blockType == BLOCK_AIR then
+            recordBlock(x, y, z, BLOCK_AIR)
+            return true
         end
-      end
+
+        if blockType == BLOCK_UNKNOWN then
+            return false, "inspection failed"
+        end
+
+        if inventoryIsFull() then
+            state.stopReason = "inventory full"
+            return false, "inventory full"
+        end
+
+        local ok = swingDirection(direction)
+
+        if not ok then
+            recordBlock(x, y, z, BLOCK_UNBREAKABLE)
+            state.failedTargets = state.failedTargets + 1
+            robot.setLightColor(COLOR_HAZARD)
+            return false, "unbreakable"
+        end
+
+        swings = swings + 1
+
+        if blockType == BLOCK_VALUABLE then
+            state.oresMined = state.oresMined + 1
+        elseif blockType == BLOCK_TRASH then
+            state.trashBroken = state.trashBroken + 1
+        end
+
+        -- Reinspection on the next iteration handles gravel and sand that
+        -- fall into the cleared position.
     end
-  end
+
+    recordBlock(x, y, z, BLOCK_UNBREAKABLE)
+    state.failedTargets = state.failedTargets + 1
+
+    robot.setLightColor(COLOR_HAZARD)
+    return false, "too many falling blocks"
 end
 
--- ================================ M I N I N G ================================== --
-function qforward()
-  -- while not forward() do robot.swing() end
-  while not forward() and robot.swing() do end
+-- ============================================================================
+-- Movement
+-- ============================================================================
+
+local function movementTarget(direction)
+    return targetForDirection(
+        state.x,
+        state.y,
+        state.z,
+        direction
+    )
 end
 
-function trash(side)
-  for i=1, trash_slots do
-    robot.select(i)
-    if side == sides.up then
-      a,t = robot.detectUp()
-      if t ~= 'solid' or robot.compareUp() then return true end
-    elseif side == sides.front then
-      a,t = robot.detect()
-      if t ~= 'solid' or robot.compare() then return true end
+local function markImpassable(x1, y1, z1, x2, y2, z2)
+    state.impassableEdges[
+        edgeKey(x1, y1, z1, x2, y2, z2)
+    ] = true
+end
+
+local function isImpassable(x1, y1, z1, x2, y2, z2)
+    return state.impassableEdges[
+        edgeKey(x1, y1, z1, x2, y2, z2)
+    ] == true
+end
+
+local function performMove(direction)
+    if direction == "up" then
+        return robot.up()
+    end
+
+    if direction == "down" then
+        return robot.down()
+    end
+
+    if not faceHeading(direction) then
+        return false, "cannot turn"
+    end
+
+    return robot.forward()
+end
+
+local function safeMove(direction)
+    local oldX = state.x
+    local oldY = state.y
+    local oldZ = state.z
+
+    local newX, newY, newZ = movementTarget(direction)
+
+    if isImpassable(oldX, oldY, oldZ, newX, newY, newZ) then
+        return false, "known impassable edge"
+    end
+
+    for attempt = 1, MAX_MOVE_ATTEMPTS do
+        if energyIsLow() then
+            state.stopReason = "low energy"
+            return false, "low energy"
+        end
+
+        local ok, reason = performMove(direction)
+
+        if ok then
+            state.x = newX
+            state.y = newY
+            state.z = newZ
+
+            recordBlock(newX, newY, newZ, BLOCK_AIR)
+            return true
+        end
+
+        -- The path may have been filled by falling gravel or sand.
+        local blockType = inspectDirection(direction)
+
+        if blockType ~= BLOCK_AIR and blockType ~= BLOCK_UNKNOWN then
+            clearDirection(direction)
+        end
+    end
+
+    markImpassable(oldX, oldY, oldZ, newX, newY, newZ)
+    return false, "movement failed"
+end
+
+-- ============================================================================
+-- Frontier ordering
+-- ============================================================================
+
+local function blockPriority(blockType)
+    if blockType == BLOCK_VALUABLE then
+        return 1
+    end
+
+    if blockType == BLOCK_AIR then
+        return 2
+    end
+
+    if blockType == BLOCK_TRASH then
+        return 3
+    end
+
+    return 4
+end
+
+local function inspectDirectionsInPriorityOrder()
+    local candidates = {}
+    local originalHeading = state.heading
+
+    for i = 1, #allDirections do
+        local direction = allDirections[i]
+        local blockType, x, y, z = inspectAndRecord(direction)
+
+        candidates[#candidates + 1] = {
+            direction = direction,
+            type = blockType,
+            x = x,
+            y = y,
+            z = z,
+            priority = blockPriority(blockType)
+        }
+    end
+
+    faceHeading(originalHeading)
+
+    -- Stable insertion sort. Valuable blocks are handled first, followed by
+    -- already-open space, then trash frontier blocks.
+    for i = 2, #candidates do
+        local current = candidates[i]
+        local j = i - 1
+
+        while j >= 1
+            and candidates[j].priority > current.priority do
+            candidates[j + 1] = candidates[j]
+            j = j - 1
+        end
+
+        candidates[j + 1] = current
+    end
+
+    return candidates
+end
+
+-- ============================================================================
+-- DFS frame handling
+-- ============================================================================
+
+local function makeFrame()
+    local key = coordinateKey(state.x, state.y, state.z)
+
+    state.visited[key] = true
+
+    return {
+        x = state.x,
+        y = state.y,
+        z = state.z,
+        key = key,
+        candidates = inspectDirectionsInPriorityOrder(),
+        nextCandidate = 1,
+        enteredBy = nil
+    }
+end
+
+local function candidateCanBeEntered(candidate)
+    if candidate.type == BLOCK_UNBREAKABLE
+        or candidate.type == BLOCK_UNKNOWN then
+        return false
+    end
+
+    local targetKey = coordinateKey(
+        candidate.x,
+        candidate.y,
+        candidate.z
+    )
+
+    if state.visited[targetKey] then
+        return false
+    end
+
+    if isImpassable(
+        state.x,
+        state.y,
+        state.z,
+        candidate.x,
+        candidate.y,
+        candidate.z
+    ) then
+        return false
+    end
+
+    return true
+end
+
+local function openCandidate(candidate)
+    local direction = candidate.direction
+    local targetKey = coordinateKey(
+        candidate.x,
+        candidate.y,
+        candidate.z
+    )
+
+    local currentType = inspectDirection(direction)
+
+    if currentType == BLOCK_UNKNOWN
+        or currentType == BLOCK_UNBREAKABLE then
+        return false
+    end
+
+    if state.visited[targetKey] then
+        return false
+    end
+
+    if currentType ~= BLOCK_AIR then
+        local cleared = clearDirection(direction)
+
+        if not cleared then
+            return false
+        end
+
+        recordBlock(
+            candidate.x,
+            candidate.y,
+            candidate.z,
+            BLOCK_AIR
+        )
+    end
+
+    return safeMove(direction)
+end
+
+local function returnToParent(frame)
+    if frame.enteredBy == nil then
+        return true
+    end
+
+    local direction = inverseDirection(frame.enteredBy)
+
+    return safeMove(direction)
+end
+
+-- ============================================================================
+-- Exhaustive traversal
+-- ============================================================================
+
+local function traverse()
+    local stack = {
+        makeFrame()
+    }
+
+    while #stack > 0 do
+        if energyIsLow() then
+            state.stopReason = "low energy"
+            break
+        end
+
+        if inventoryIsFull() then
+            state.stopReason = "inventory full"
+            break
+        end
+
+        local frame = stack[#stack]
+
+        if frame.nextCandidate > #frame.candidates then
+            local returned = returnToParent(frame)
+
+            if not returned then
+                state.stopReason = "could not backtrack"
+                break
+            end
+
+            stack[#stack] = nil
+        else
+            local candidate = frame.candidates[frame.nextCandidate]
+            frame.nextCandidate = frame.nextCandidate + 1
+
+            if candidateCanBeEntered(candidate) then
+                local opened = openCandidate(candidate)
+
+                if opened then
+                    robot.setLightColor(COLOR_NORMAL)
+
+                    stack[#stack + 1] = makeFrame()
+                    stack[#stack].enteredBy = candidate.direction
+                end
+            end
+        end
+    end
+
+    -- If traversal stopped early, unwind all entered frames. This returns the
+    -- robot to the starting coordinate whenever the already-used path remains
+    -- traversable.
+    while #stack > 1 do
+        local frame = stack[#stack]
+        local returned = returnToParent(frame)
+
+        if not returned then
+            state.stopReason = "could not return after abort"
+            return false
+        end
+
+        stack[#stack] = nil
+    end
+
+    return true
+end
+
+-- ============================================================================
+-- Main program
+-- ============================================================================
+
+local function runMiner()
+    recordCurrentPosition()
+    robot.setLightColor(COLOR_NORMAL)
+
+    print("Beginning exhaustive ore traversal.")
+
+    local completed = traverse()
+
+    if completed and state.stopReason == nil then
+        print("Traversal complete.")
     else
-      a,t = robot.detectDown()
-      if t ~= 'solid' or robot.compareDown() then return true end
+        print("Traversal stopped: " .. tostring(state.stopReason))
     end
-  end
-  return false
+
+    -- The traversal should already have returned to the origin. Restore the
+    -- original heading as a final safety measure.
+    robot.setLightColor(COLOR_RETURN)
+    faceHeading(0)
+    robot.setLightColor(COLOR_IDLE)
+
+    print(
+        "Position: ("
+        .. tostring(state.x)
+        .. ","
+        .. tostring(state.y)
+        .. ","
+        .. tostring(state.z)
+        .. ")"
+    )
+
+    print("Ores mined: " .. tostring(state.oresMined))
+    print("Trash blocks mined: " .. tostring(state.trashBroken))
+    print("Unbreakable targets: " .. tostring(state.failedTargets))
 end
 
-function mine(side)
-  local direct = loc.d
-  local backdir = (direct+2)%4
-
-  if side == sides.up then
-    c = 0
-    while not up() do
-      robot.swingUp()
-      c = c + 1
-      if c>DEAD_END then return end
-    end
-  elseif side == sides.front then
-    c = 0
-    while not forward() do
-      robot.swing()
-      c = c + 1
-      if c>DEAD_END then return end
-    end
-  elseif side == sides.down then
-    c = 0
-    while not down() do
-      robot.swingDown()
-      c = c + 1
-      if c>DEAD_END then return end
-    end
-  end
-
-  lode[loc.x*MAX*MAX + loc.y*MAX + loc.z] = true
-
-  -- check further direction
-  if lode[loc.x*MAX*MAX + loc.y*MAX + (loc.z+1)] == nil then
-    if not trash(sides.up) then mine(sides.up)
-    else lode[loc.x*MAX*MAX + loc.y*MAX + (loc.z+1)] = false end
-  end
-  if lode[loc.x*MAX*MAX + loc.y*MAX + (loc.z-1)] == nil then
-    if not trash(sides.down) then mine(sides.down)
-    else lode[loc.x*MAX*MAX + loc.y*MAX + (loc.z-1)] = false end
-  end
-
-  for i=loc.d, loc.d+3 do
-    local a = i%4
-    local x = loc.x
-    local y = loc.y
-    if a == 0 then y = y + 1
-    elseif a == 1 then x = x + 1
-    elseif a == 2 then y = y - 1
-    else x = x - 1 end
-    if lode[x*MAX*MAX + y*MAX + loc.z] == nil then
-      while loc.d < a do turnRight() end
-      while loc.d > a do turnLeft() end
-      if not trash(sides.front) then mine(sides.front) 
-      else lode[x*MAX*MAX + y*MAX + loc.z] = false end
-    end
-  end
-
-  -- come back
-  if side == sides.up then
-    down()
-  elseif side == sides.front then
-    if loc.d == direct and back() then
-      -- yet ready =)
-    else
-      while loc.d < backdir do turnRight() end
-      while loc.d > backdir do turnLeft() end
-      qforward()
-    end
-  elseif side == sides.down then
-    up()
-  end
-end
-
-function go(side)
-  direct = loc.d
-  lode = {}
-  mine(side)
-  while loc.d < direct do turnRight() end
-  while loc.d > direct do turnLeft() end
-end
-
-function step(progress)
-  -- every tenth
-  tenth = (loc.x % 15 == 0)
-  -- dig one row
-  for x=1, w do
-    -- check up/down
-    if not trash(sides.down) then go(sides.down) end
-    if not trash(sides.up) then go(sides.up) end
-    -- tonnel for player
-    if PATHWAYS then
-      if loc.y == halfw then
-        robot.swingDown()
-        while robot.detectUp() do robot.swingUp() end
-      end
-      if x == 1 or x == w then
-        robot.swingDown()
-      end
-    else
-      if loc.y == halfw then
-        robot.swingDown()
-      end
-    end
-    -- move
-    if x<w then
-      qforward()
-      if PATHWAYS and tenth then robot.swingDown() end
-    end
-  end
-
-  -- check front
-  if not trash(sides.front) then go(sides.front) end
-
-  -- next one
-  if progress%2==1 then
-    turnRight()
-    qforward()
-    turnRight()
-  else
-    turnLeft()
-    qforward()
-    turnLeft()
-  end
-
-  -- fuel checking
-  check_fuel()
-  -- trash checking
-  if DROP_TRASH then
-    check_trash()
-  end
-  -- loot checking
-  if check_loot() then 
-    turnAround()
-    unload() 
-    turnAround()
-  end
-end
-
-function goBack()
-  while loc.y ~= 0 do
-    qforward()
-  end
-  if loc.d == 0 then turnLeft()
-  elseif loc.d == 2 then turnRight() end
-  while loc.x ~= 0 do
-    qforward()
-  end
-  turnRight()
-end
-
--- =================================== M A I N =================================== --
-print("Totoro Recursive Miner 1.5H")
-print("[INFO] Запуск. Длина: "..l..". Ширина: "..w..'. \n       Возврат: '..comeback)
-if cloader ~= nil and USE_CLOADER then 
-  cloader.setActive(true) 
-  print("[INFO] Чанклодер активирован.")
-end
-print("[INFO] Выключите робота, чтобы прервать работу.")
-
--- statistic value
-moves = 0
--- main cycle
-robot.turnLeft()
-if light_allowed then robot.setLightColor(color.working) end
-for i=1, l do
-  step(i)
-end
-
--- ==================================== E N D ==================================== --
--- move to start position
-if comeback == 'true' then goBack() end
-if light_allowed then robot.setLightColor(color.idle) end
-robot.turnRight()
-
-if cloader ~= nil and USE_CLOADER then 
-  cloader.setActive(false)
-  print("[INFO] Чанклодер деактивирован.")
-end
-print("[STATISTIC] Движений: "..moves)
+runMiner()
 
 
+
+
+
+print('DONE')
 while true do piccolo_yield() end
 "#.as_bytes();
 
