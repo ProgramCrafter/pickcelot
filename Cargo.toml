@@ -5,6 +5,6 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.102"
-eframe = "0.33.3"
-egui = "0.33.3"
+eframe = { version = "0.37.0", features = ["glow"] }
+egui = "0.37.0"
 piccolo = "0.3.3"

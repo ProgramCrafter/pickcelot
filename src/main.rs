@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use egui::*;
 
 
@@ -31,7 +31,7 @@ while true do
 end
 ";
 
-const LUA_CODE: &[u8] = "
+const _LUA_CODE_SPECTRUM: &[u8] = "
 string.rep = function(s, n)
     if n == 0 then return '' end
     if n == 1 then return s end
@@ -186,6 +186,49 @@ end
 ".as_bytes();
 
 
+const LUA_CODE: &[u8] = b"
+
+local inventory = {}
+inventory['pickcelot:stone'] = 0
+inventory['pickcelot:ore'] = 0
+inventory['pickcelot:air'] = 0
+
+local function swing()
+    local success, block = piccolo_component_invoke('$robot', 'robot.swing')
+    if success then
+        inventory[block] = (inventory[block] or 0) + 1
+    end
+    return success
+end
+
+local moves = 0
+
+while true do
+    while swing() do
+        if piccolo_component_invoke('$robot', 'robot.forward') then
+            moves = moves + 1
+        end
+    end
+    piccolo_component_invoke('$robot', 'robot.turnRight')
+    
+    local h = 0
+    for itemid, count in pairs(inventory) do
+        h = h + 1
+        piccolo_component_invoke(
+            '$gpu', 
+            'gpu.set',
+            1,
+            h,
+            itemid .. ': ' .. tostring(count) .. '  ',
+            false
+        )
+    end
+    piccolo_component_invoke('$gpu', 'gpu.set', 1, h + 1,
+        'Moves: ' .. tostring(moves) .. '  ', false)
+end
+";
+
+
 mod screen {
     use crate::*;
     
@@ -255,6 +298,159 @@ mod screen {
                 painter.rect_filled(cell_rect, 0.0, bg);
                 painter.text(pos, Align2::LEFT_TOP, ch, font_id.clone(), fg);
             });
+            
+            response
+        }
+    }
+}
+
+mod voxel {
+    use crate::*;
+    
+    #[repr(u8)]
+    #[derive(Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+    pub enum Voxel { Air = 0, Stone, Ore }
+    
+    impl Voxel {
+        pub fn export_item_id(self) -> Box<[u8]> {
+            match self {
+                Self::Air => b"pickcelot:air".to_owned().into(),
+                Self::Stone => b"pickcelot:stone".to_owned().into(),
+                Self::Ore => b"pickcelot:ore".to_owned().into(),
+            }
+        }
+    }
+    
+    #[derive(Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+    pub enum Direction {
+        ZPlus,
+        XPlus,
+        ZMinus,
+        XMinus,
+    }
+    impl Direction {
+        fn offset(&self, pos: (usize, usize, usize)) -> Option<(usize, usize, usize)> {
+            let (x, y, z) = pos;
+            Some(match self {
+                Self::ZPlus => (x, y, z.checked_add(1)?),
+                Self::XPlus => (x.checked_add(1)?, y, z),
+                Self::ZMinus => (x, y, z.checked_sub(1)?),
+                Self::XMinus => (x.checked_sub(1)?, y, z),
+            })
+        }
+        
+        pub fn turn_right(&mut self) {
+            match self {
+                Self::ZPlus => { *self = Self::XPlus; }
+                Self::XPlus => { *self = Self::ZMinus; }
+                Self::ZMinus => { *self = Self::XMinus; }
+                Self::XMinus => { *self = Self::ZPlus; }
+            }
+        }
+    }
+    
+    
+    pub struct Chunk<const S: usize> {
+        pub blocks: Box<[[[Voxel; S]; S]; S]>,
+        pub robot_cut: (usize, usize, usize),
+        pub robot_dir: Direction,
+    }
+    
+    impl<const S: usize> Chunk<S> {
+        fn new() -> Self {
+            Self {
+                blocks: Box::new([[[Voxel::Stone; S]; S]; S]),
+                robot_cut: (S - 1, (S - 1) / 2, S - 1),
+                robot_dir: Direction::ZPlus,
+            }
+        }
+        fn draw_callback(&self, mut painter: impl FnMut(f32, f32, f32, bool, Voxel)) {
+            for z in 0..S {
+                for y in 0..S {
+                    for x in 0..S {
+                        let (x0, y0, z0) = self.robot_cut;
+                        let transparent = (x0 <= x) | (y0 <= y) | (z0 <= z);
+                        
+                        painter(x as f32, y as f32, z as f32, transparent,
+                                self.blocks[z][y][x]);
+                    }
+                }
+            }
+        }
+        
+        pub fn robot_swing(&mut self) -> Option<Voxel> {
+            let robot_pos = self.robot_cut;
+            let (x, y, z) = self.robot_dir.offset(robot_pos)?;
+            let swing_block = self.blocks.get_mut(z)?.get_mut(y)?.get_mut(x)?;
+            
+            let had = std::mem::replace(swing_block, Voxel::Air);
+            Some(had)
+        }
+        pub fn robot_forward(&mut self) -> Option<()> {
+            let robot_pos = self.robot_cut;
+            let (x, y, z) = self.robot_dir.offset(robot_pos)?;
+            let move_block = self.blocks.get(z)?.get(y)?.get(x)?;
+            if *move_block == Voxel::Air {
+                self.robot_cut = (x, y, z);
+                Some(())
+            } else {
+                None
+            }
+        }
+    }
+    
+    impl<const S: usize> Default for Chunk<S> {
+        fn default() -> Self { Self::new() }
+    }
+    
+    impl<'a, const S: usize> Widget for &'a Chunk<S> {
+        fn ui(self, ui: &mut Ui) -> Response {
+            // 1. Space requirements.
+            let w = ui.available_width();
+            let h = ui.available_height();
+            let s = S as f32;
+            
+            const HEX: f32 = 0.8660254037844386f32;
+            const IHEX: f32 = 1.1547005383792515f32;
+            let cell = (w * IHEX / s).min(h / s);
+            let grid = vec2(cell * s * HEX, cell * s);
+            let sense = Sense::empty();
+            
+            let u = vec2(0.0, -cell / 2.0);
+            let v = vec2(-cell * HEX / 2.0, cell / 4.0);
+            let w = vec2(cell * HEX / 2.0, cell / 4.0);
+            
+            // 2. Space.
+            let (response, painter) = ui.allocate_painter(grid, sense);
+            let rect = response.rect;
+            let center = rect.center();
+            
+            // 3. Drawing.
+            self.draw_callback(|x, y, z, transparent, voxel| {
+                let mut color = match voxel {
+                    Voxel::Air => return,
+                    Voxel::Stone => Color32::LIGHT_GRAY,
+                    Voxel::Ore => Color32::BROWN,
+                };
+                if transparent {
+                    color = color.gamma_multiply(0.13);
+                }
+                
+                let back_corner = center + v * x + u * y + w * z;
+                let mesh = epaint::PathShape::convex_polygon(
+                    vec![back_corner + u, back_corner + u + v,
+                         back_corner + v, back_corner - u,
+                         back_corner + w, back_corner + w + u],
+                    color,
+                    epaint::PathStroke::NONE
+                );
+                
+                painter.add(mesh);
+            });
+            
+            let (rx, ry, rz) = self.robot_cut;
+            let robot_center = center + v * (rx as f32) + u * (ry as f32) + w * (rz as f32);
+            painter.circle_filled(robot_center, cell / 4.0, Color32::BLUE);
             
             response
         }
@@ -347,6 +543,8 @@ struct Peripherals {
     gpu:    (Color32, Color32),
     sleep:  f64,
     timer:  f64,
+    
+    ores:   voxel::Chunk<16>,
 }
 
 struct App {
@@ -391,6 +589,8 @@ impl Default for App {
             gpu:    (Color32::WHITE, Color32::DARK_BLUE),
             sleep:  f64::NEG_INFINITY,
             timer:  f64::NAN,
+            
+            ores:   Default::default(),
         };
         
         // 3. Callbacks for peripherals.
@@ -456,6 +656,50 @@ impl Default for App {
         );
         
         components.insert(
+            ("$robot".to_owned(), "robot.turnRight".to_owned()),
+            |p: &mut Peripherals, args: &LuaList| -> InvResult {
+                let [] = args.as_array().ok_or_else(|| anyhow::anyhow!("wrong number of arguments passed: 0 expected"))?;
+                p.sleep = p.sleep.max(p.timer + 0.15);
+                p.ores.robot_dir.turn_right();
+                Ok(vec![])
+            } as _
+        );
+        
+        components.insert(
+            ("$robot".to_owned(), "robot.swing".to_owned()),
+            |p: &mut Peripherals, args: &LuaList| -> InvResult {
+                let [] = args.as_array().ok_or_else(|| anyhow::anyhow!("wrong number of arguments passed: 0 expected"))?;
+                
+                match p.ores.robot_swing() {
+                    None    => Ok(vec![piccolo::Constant::Boolean(false)]),
+                    Some(broke_block) => {
+                        if broke_block != voxel::Voxel::Air {
+                            p.sleep = p.sleep.max(p.timer + 0.25);
+                        }
+                        Ok(vec![
+                            piccolo::Constant::Boolean(true),
+                            piccolo::Constant::String(broke_block.export_item_id()),
+                        ])
+                    },
+                }
+            } as _
+        );
+        
+        components.insert(
+            ("$robot".to_owned(), "robot.forward".to_owned()),
+            |p: &mut Peripherals, args: &LuaList| -> InvResult {
+                let [] = args.as_array().ok_or_else(|| anyhow::anyhow!("wrong number of arguments passed: 0 expected"))?;
+                
+                p.sleep = p.sleep.max(p.timer + 0.02);
+                
+                match p.ores.robot_forward() {
+                    None     => Ok(vec![piccolo::Constant::Boolean(false)]),
+                    Some(()) => Ok(vec![piccolo::Constant::Boolean(true)]),
+                }
+            } as _
+        );
+        
+        components.insert(
             ("$os".to_owned(), "os.sleep".to_owned()),
             |p: &mut Peripherals, args: &LuaList| -> InvResult {
                 let [time] = args.as_array().ok_or_else(|| anyhow::anyhow!("wrong number of arguments passed: 1 expected"))?;
@@ -475,8 +719,8 @@ impl Default for App {
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ectx: &Context, _frame: &mut eframe::Frame) {
-        self.peripheral.timer = ectx.input(|i| i.time);
+    fn ui(&mut self, eui: &mut Ui, _frame: &mut eframe::Frame) {
+        self.peripheral.timer = eui.ctx().input(|i| i.time);
         
         let mut invocations = 0;
         
@@ -485,7 +729,7 @@ impl eframe::App for App {
             
             let sleep_t = self.peripheral.sleep - self.peripheral.timer;
             if sleep_t > 0.0 {
-                ectx.request_repaint_after_secs(sleep_t as f32);
+                eui.ctx().request_repaint_after_secs(sleep_t as f32);
                 return;
             }
             self.peripheral.sleep = f64::NEG_INFINITY;
@@ -525,13 +769,19 @@ impl eframe::App for App {
             }
             
             if ex.mode() != ExecutorMode::Stopped {
-                ectx.request_repaint_after_secs(0.04);
+                eui.ctx().request_repaint_after_secs(0.04);
             }
         });
         
+        Panel::right("ores")
+            .frame(Frame::new().inner_margin(PADDING))
+            .show(eui, |ui| {
+                ui.add(&self.peripheral.ores);
+            });
+        
         CentralPanel::default()
             .frame(Frame::new().inner_margin(PADDING))
-            .show(ectx, |ui| {
+            .show(eui, |ui| {
                 ui.add(&self.peripheral.screen);
                 ui.add_space(PADDING);
                 
@@ -546,7 +796,7 @@ impl eframe::App for App {
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
-        viewport: ViewportBuilder::default().with_inner_size([1032.0, 832.0]),
+        viewport: ViewportBuilder::default().with_inner_size([1632.0, 832.0]),
         ..Default::default()
     };
 
