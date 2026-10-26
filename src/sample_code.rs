@@ -6,6 +6,23 @@ local require
 
 local do_init
 do_init = function()
+    local inventory = {}
+    local function swing(side)
+        local success, block = piccolo_component_invoke('$robot', 'robot.swing', side)
+        if success then
+            inventory[block] = (inventory[block] or 0) + 1
+            
+            local name = piccolo_component_invoke('$robot', 'robot.name')
+            print(name .. "'s inventory")
+            for k, count in pairs(inventory) do
+                print('- ' .. k .. ': ' .. tostring(count))
+            end
+            print('')
+        end
+        return success
+    end
+    
+    
     local sides = {
         down = 0,
         up = 1,
@@ -55,6 +72,10 @@ do_init = function()
         compareDown = function() return
             piccolo_component_invoke('$robot', 'robot.hidden$compareRocks', sides.down) end
     }
+    robot.swing = function() return swing(sides.front) end
+    robot.swingUp = function() return swing(sides.up) end
+    robot.swingDown = function() return swing(sides.down) end
+    
     local component = {
         isAvailable = function() return false end
     }
@@ -73,10 +94,14 @@ do_init = function()
     
     local print_y = 0
     local _w, print_h = piccolo_component_invoke('$gpu', 'gpu.getResolution')
+    local s8 = '        '
+    local s16 = s8 .. s8
+    local s32 = s16 .. s16
+    local s80 = s16 .. s32 .. s32
     print = function(s)
         print_y = print_y + 1
         if print_y > print_h then print_y = 1 end
-        piccolo_component_invoke('$gpu', 'gpu.set', 1, print_y, s, false)
+        piccolo_component_invoke('$gpu', 'gpu.set', 1, print_y, s .. s80, false)
     end
     
     tonumber = tonumber or function() return nil end
@@ -471,5 +496,8 @@ if cloader ~= nil and USE_CLOADER then
   print("[INFO] Чанклодер деактивирован.")
 end
 print("[STATISTIC] Движений: "..moves)
+
+
+while true do piccolo_yield() end
 "#.as_bytes();
 
