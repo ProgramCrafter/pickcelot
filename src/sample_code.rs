@@ -156,13 +156,14 @@ end
 
 pub const LUA_CODE: &[u8] = b"
 
+local me = piccolo_component_invoke('$robot', 'robot.name')
+piccolo_component_invoke('$gpu', 'gpu.set', 1, 1, me .. ' operations     ', false)
+piccolo_component_invoke('$gpu', 'gpu.set', 1, 2, 'Inventory:               ', false)
+
 local inventory = {}
-inventory['pickcelot:stone'] = 0
-inventory['pickcelot:ore'] = 0
-inventory['pickcelot:air'] = 0
 
 local function swing()
-    local success, block = piccolo_component_invoke('$robot', 'robot.swing')
+    local success, block = piccolo_component_invoke('$robot', 'robot.swing', 3)
     if success then
         inventory[block] = (inventory[block] or 0) + 1
     end
@@ -173,13 +174,13 @@ local moves = 0
 
 while true do
     while swing() do
-        if piccolo_component_invoke('$robot', 'robot.forward') then
+        if piccolo_component_invoke('$robot', 'robot.move', 3) then
             moves = moves + 1
         end
     end
-    piccolo_component_invoke('$robot', 'robot.turnRight')
+    piccolo_component_invoke('$robot', 'robot.turn', true)
     
-    local h = 0
+    local h = 2
     for itemid, count in pairs(inventory) do
         h = h + 1
         piccolo_component_invoke(
@@ -187,7 +188,7 @@ while true do
             'gpu.set',
             1,
             h,
-            itemid .. ': ' .. tostring(count) .. '  ',
+            '- ' .. itemid .. ': ' .. tostring(count) .. '    ',
             false
         )
     end

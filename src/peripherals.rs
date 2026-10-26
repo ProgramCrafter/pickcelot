@@ -2,7 +2,10 @@ use std::collections::HashMap;
 use anyhow::anyhow;
 use egui::Color32;
 
-use crate::bridge::{LuaList, asize, ld_int, ld_bool, ld_str};
+use crate::bridge::{LuaList, ld_int, ld_bool, ld_str};
+use crate::voxels::Direction;
+use crate::read_or_bail;
+
 type InvResult = Result<LuaList, anyhow::Error>;
 
 
@@ -13,6 +16,12 @@ pub struct Peripherals {
     pub timer:  f64,
     
     pub ores:   crate::voxels::Chunk<16>,
+}
+
+impl Peripherals {
+    fn require_pause(&mut self, dt: f64) {
+        self.sleep = self.sleep.max(self.timer + dt);
+    }
 }
 
 impl Default for Peripherals {
@@ -29,6 +38,24 @@ impl Default for Peripherals {
 }
 
 
+fn lua_direction(p: &Peripherals, args: &LuaList) -> anyhow::Result<Direction> {
+    read_or_bail!([side] = args);
+    
+    Ok(match ld_int(side) {
+        Ok(0) => Direction::Down,
+        Ok(1) => Direction::Up,
+        Ok(2) => {
+            let mut d = p.ores.robot_dir;
+            d.turn_around();
+            Direction::Ground(d)
+        },
+        Ok(3) => Direction::Ground(p.ores.robot_dir),
+        Ok(e) => return Err(anyhow!("bad direction cardinal {e}")),
+        Err(e) => return Err(e.context("direction cardinal")),
+    })
+}
+
+
 
 pub type Reactions = HashMap<
     (String, String),
@@ -36,11 +63,13 @@ pub type Reactions = HashMap<
 >;
 
 pub fn build_reactions() -> Reactions {
+    use piccolo::Constant;
+    
     let mut reactions = HashMap::new();
     reactions.insert(
         ("$gpu".to_owned(), "gpu.set".to_owned()),
         |p: &mut Peripherals, args: &LuaList| -> InvResult {
-            let [cx, cy, cs, cd] = args.as_array().ok_or_else(asize)?;
+            read_or_bail!([cx, cy, cs, cd] = args);
             let mut pos = (ld_int(cx)?.saturating_sub(1),
                            ld_int(cy)?.saturating_sub(1));
             let d = ld_bool(cd)?;
@@ -60,12 +89,12 @@ pub fn build_reactions() -> Reactions {
     reactions.insert(
         ("$gpu".to_owned(), "gpu.getResolution".to_owned()),
         |p: &mut Peripherals, args: &LuaList| -> InvResult {
-            let [] = args.as_array().ok_or_else(|| anyhow!("wrong number of arguments passed: 0 expected"))?;
+            read_or_bail!([] = args);
             
             let _screen: &crate::screen::Screen<90, 35> = &p.screen;
             Ok(vec![
-                piccolo::Constant::Integer(90),
-                piccolo::Constant::Integer(35),
+                Constant::Integer(90),
+                Constant::Integer(35),
             ])
         } as _
     );
@@ -73,7 +102,7 @@ pub fn build_reactions() -> Reactions {
     reactions.insert(
         ("$gpu".to_owned(), "gpu.setForeground".to_owned()),
         |p: &mut Peripherals, args: &LuaList| -> InvResult {
-            let [color] = args.as_array().ok_or_else(|| anyhow!("wrong number of arguments passed: 1 expected"))?;
+            read_or_bail!([color] = args);
             let color = color.to_integer().ok_or_else(|| anyhow!("int conversion failed"))?;
             let r = u8::try_from(color / 65536)?;
             let g = u8::try_from((color % 65536) / 256)?;
@@ -86,7 +115,7 @@ pub fn build_reactions() -> Reactions {
     reactions.insert(
         ("$gpu".to_owned(), "gpu.setBackground".to_owned()),
         |p: &mut Peripherals, args: &LuaList| -> InvResult {
-            let [color] = args.as_array().ok_or_else(|| anyhow!("wrong number of arguments passed: 1 expected"))?;
+            read_or_bail!([color] = args);
             let color = color.to_integer().ok_or_else(|| anyhow!("int conversion failed"))?;
             let r = u8::try_from(color / 65536)?;
             let g = u8::try_from((color % 65536) / 256)?;
@@ -97,56 +126,88 @@ pub fn build_reactions() -> Reactions {
     );
     
     reactions.insert(
-        ("$robot".to_owned(), "robot.turnRight".to_owned()),
+        ("$os".to_owned(), "os.sleep".to_owned()),
         |p: &mut Peripherals, args: &LuaList| -> InvResult {
-            let [] = args.as_array().ok_or_else(|| anyhow!("wrong number of arguments passed: 0 expected"))?;
-            p.sleep = p.sleep.max(p.timer + 0.15);
-            p.ores.robot_dir.turn_right();
+            read_or_bail!([time] = args);
+            p.sleep = p.timer + time.to_number().ok_or_else(|| anyhow!("number conversion failed"))?;
             Ok(vec![])
+        } as _
+    );
+    
+    
+    // OK durability():number
+    // OK move(direction:number):boolean
+    // OK turn(clockwise:boolean):boolean
+    // OK name():string
+    // 33 swing(side:number[, face:number=side[, sneaky:boolean=false]]):boolean[, string]
+    // no use(side:number[, face:number=side[, sneaky:boolean=false[, duration:number=0]]]): boolean[, string]
+    // no place(side:number[, face:number=side[, sneaky:boolean=false]]): boolean[, string]
+    // no getLightColor():number
+    // no setLightColor(value:number):number
+    
+    reactions.insert(
+        ("$robot".to_owned(), "robot.durability".to_owned()),
+        |_: &mut Peripherals, args: &LuaList| -> InvResult {
+            read_or_bail!([] = args);
+            Ok(vec![
+                Constant::Number(f64::INFINITY)
+            ])
+        } as _
+    );
+    
+    reactions.insert(
+        ("$robot".to_owned(), "robot.move".to_owned()),
+        |p: &mut Peripherals, args: &LuaList| -> InvResult {
+            let dir = lua_direction(p, args)?;
+            let success = Constant::Boolean(p.ores.robot_move(Some(dir)));
+            p.require_pause(0.02);
+            Ok(vec![ success ])
+        } as _
+    );
+    
+    reactions.insert(
+        ("$robot".to_owned(), "robot.turn".to_owned()),
+        |p: &mut Peripherals, args: &LuaList| -> InvResult {
+            read_or_bail!([clockwise] = args);
+            if ld_bool(clockwise)? {
+                p.ores.robot_dir.turn_right();
+            } else {
+                p.ores.robot_dir.turn_left();
+            }
+            p.require_pause(0.15);
+            Ok(vec![ Constant::Boolean(true) ])
+        } as _
+    );
+    
+    reactions.insert(
+        ("$robot".to_owned(), "robot.name".to_owned()),
+        |_: &mut Peripherals, args: &LuaList| -> InvResult {
+            read_or_bail!([] = args);
+            Ok(vec![ Constant::String(b"Pickitten".to_owned().into()) ])
         } as _
     );
     
     reactions.insert(
         ("$robot".to_owned(), "robot.swing".to_owned()),
         |p: &mut Peripherals, args: &LuaList| -> InvResult {
-            let [] = args.as_array().ok_or_else(|| anyhow!("wrong number of arguments passed: 0 expected"))?;
+            let dir = lua_direction(p, args)?;
             
-            match p.ores.robot_swing(None) {
-                None    => Ok(vec![piccolo::Constant::Boolean(false)]),
+            match p.ores.robot_swing(Some(dir)) {
+                None    => Ok(vec![Constant::Boolean(false)]),
                 Some(broke_block) => {
                     if broke_block.is_tough() {
-                        p.sleep = p.sleep.max(p.timer + 0.25);
+                        p.require_pause(0.25);
                     }
                     Ok(vec![
-                        piccolo::Constant::Boolean(true),
-                        piccolo::Constant::String(broke_block.destroy_to_itemid()),
+                        Constant::Boolean(true),
+                        Constant::String(broke_block.destroy_to_itemid()),
                     ])
                 },
             }
         } as _
     );
     
-    reactions.insert(
-        ("$robot".to_owned(), "robot.forward".to_owned()),
-        |p: &mut Peripherals, args: &LuaList| -> InvResult {
-            let [] = args.as_array().ok_or_else(|| anyhow!("wrong number of arguments passed: 0 expected"))?;
-            
-            p.sleep = p.sleep.max(p.timer + 0.02);
-            
-            Ok(vec![
-                piccolo::Constant::Boolean(p.ores.robot_move(None)),
-            ])
-        } as _
-    );
     
-    reactions.insert(
-        ("$os".to_owned(), "os.sleep".to_owned()),
-        |p: &mut Peripherals, args: &LuaList| -> InvResult {
-            let [time] = args.as_array().ok_or_else(|| anyhow!("wrong number of arguments passed: 1 expected"))?;
-            p.sleep = p.timer + time.to_number().ok_or_else(|| anyhow!("number conversion failed"))?;
-            Ok(vec![])
-        } as _
-    );
     
     reactions
 }

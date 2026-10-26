@@ -2,7 +2,7 @@ use piccolo::*;
 use std::string::String;
 
 type NonConstant<'gc> = Value<'gc>;
-type BoxConstant = Constant<Box<[u8]>>;
+pub type BoxConstant = Constant<Box<[u8]>>;
 
 pub type Manyval<'gc> = Variadic<Vec<NonConstant<'gc>>>;
 pub type LuaList = Vec<BoxConstant>;
@@ -70,7 +70,26 @@ pub fn ld_str(v: &BoxConstant) -> Result<&str, anyhow::Error> {
         _ => Err(anyhow::anyhow!("expected string value")),
     }
 }
-pub fn asize() -> anyhow::Error {
-    anyhow::anyhow!("wrong number of arguments passed")
+
+#[macro_export]
+macro_rules! read_or_bail {
+    ([$($binding:ident),*] = $stack:expr) => {
+        let Some([$($binding),*]) = $stack.as_array() else {
+            let mut n = 1;
+            n -= 1;
+            
+            $(
+                #[expect(unused_variables)]
+                let $binding: ();
+                n += 1;
+            )*
+            
+            return ::std::result::Result::Err(
+                ::anyhow::anyhow!(
+                    "wrong number of arguments passed: {n} expected"
+                )
+            )
+        };
+    }
 }
 

@@ -6,6 +6,8 @@ mod sample_code;
 mod peripherals;
 mod voxels;
 mod screen;
+
+#[macro_use]
 mod bridge;
 
 use crate::sample_code::LUA_CODE;
