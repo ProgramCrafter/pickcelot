@@ -30,7 +30,7 @@ impl Default for App {
         let mut config = piccolo::Lua::core();
         
         let engine = config.enter(|ctx| {
-            use piccolo::*;
+            use piccolo::{Callback, CallbackReturn, Closure, Executor};
             
             let piccolo_yield = Callback::from_fn(&ctx, |_, mut exec, _| {
                 exec.fuel().interrupt();
@@ -67,7 +67,7 @@ impl eframe::App for App {
         let mut invocations = 0;
         
         self.config.enter(|ctx| {
-            use piccolo::*;
+            use piccolo::{Fuel, String, Error, ExecutorMode};
             
             let sleep_t = self.peripheral.sleep - self.peripheral.timer;
             if sleep_t > 0.0 {
@@ -84,7 +84,7 @@ impl eframe::App for App {
             let mut fuel = Fuel::with(4096 * 30);
             while ex.step(ctx, &mut fuel) {
                 let request = ex
-                    .take_result::<UserData>(ctx)
+                    .take_result::<piccolo::UserData>(ctx)
                     .map(|ok_mode| ok_mode.map(
                         |ud| ud.downcast_static::<ComponentInvoke>()
                     ));

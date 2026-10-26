@@ -43,7 +43,7 @@ impl<const W: usize, const H: usize> Default for Screen<W, H> {
     fn default() -> Self { Self::new() }
 }
 
-impl<'a, const W: usize, const H: usize> Widget for &'a Screen<W, H> {
+impl<const W: usize, const H: usize> Widget for &Screen<W, H> {
     fn ui(self, ui: &mut Ui) -> Response {
         // 1. Space requirements.
         let font_id = FontId::monospace(FONT_SIZE);

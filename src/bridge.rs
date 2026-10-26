@@ -16,7 +16,7 @@ pub struct ComponentInvoke {
 }
 
 impl ComponentInvoke {
-    #[must_use]
+    #[must_use = "verify result or risk empty Lua stack"]
     pub fn make<'gc>(ctx: Context<'gc>, stack: &mut Stack<'gc,'_>) -> MkResult {
         let args: Result<(String, String, Manyval), _> = stack.consume(ctx);
         let (address, method, variadic_ref) = args?;
@@ -35,7 +35,7 @@ impl ComponentInvoke {
     }
     
     #[must_use]
-    pub fn stash_vec<'gc>(ctx: Context<'gc>, results: LuaList) -> Manyval<'gc> {
+    pub fn stash_vec(ctx: Context<'_>, results: LuaList) -> Manyval<'_> {
         Variadic(results
             .into_iter()
             .map(|c| match c {

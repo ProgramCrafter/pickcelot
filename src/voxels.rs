@@ -52,7 +52,7 @@ pub enum Direction {
 }
 
 impl Direction {
-    pub fn offset(&self, pos: U3) -> Option<U3> {
+    pub fn offset(self, pos: U3) -> Option<U3> {
         let (x, y, z) = pos;
         Some(match self {
             Self::Ground(GroundDirection::XMinus) => (x.checked_sub(1)?, y, z),
@@ -132,16 +132,16 @@ impl<const S: usize> Default for Chunk<S> {
     fn default() -> Self { Self::new() }
 }
 
-impl<'a, const S: usize> Widget for &'a Chunk<S> {
+impl<const S: usize> Widget for &Chunk<S> {
     fn ui(self, ui: &mut Ui) -> Response {
+        const HEX: f32 = 0.8660254;
+        const IHEX: f32 = 1.1547005;
+        
         // 1. Space requirements.
-        let w = ui.available_width();
-        let h = ui.available_height();
         let s = S as f32;
         
-        const HEX: f32 = 0.8660254037844386f32;
-        const IHEX: f32 = 1.1547005383792515f32;
-        let cell = (w * IHEX / s).min(h / s);
+        let cell = (ui.available_width() * IHEX / s)
+               .min(ui.available_height() / s);
         let grid = vec2(cell * s * HEX, cell * s);
         let sense = Sense::empty();
         

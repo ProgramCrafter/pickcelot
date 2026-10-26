@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use anyhow::anyhow;
 use egui::Color32;
 
-use crate::bridge::*;//InvResult, LuaList};
+use crate::bridge::{LuaList, asize, ld_int, ld_bool, ld_str};
 type InvResult = Result<LuaList, anyhow::Error>;
 
 
