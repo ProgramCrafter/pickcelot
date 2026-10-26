@@ -7,4 +7,4 @@ edition = "2024"
 anyhow = "1.0.102"
 eframe = { version = "0.37.0", features = ["glow"] }
 egui = "0.37.0"
-piccolo = "0.3.3"
+piccolo = { git = "https://github.com/ProgramCrafter/piccolo", rev = "382e4ccd58b1492e3ec59a3808717e2cf0074aa2" }

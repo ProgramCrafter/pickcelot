@@ -160,7 +160,7 @@ pub fn build_reactions() -> Reactions {
         |p: &mut Peripherals, args: &LuaList| -> InvResult {
             let dir = lua_direction(p, args)?;
             let success = Constant::Boolean(p.ores.robot_move(Some(dir)));
-            p.require_pause(0.02);
+            // p.require_pause(0.02);
             Ok(vec![ success ])
         } as _
     );
@@ -174,7 +174,7 @@ pub fn build_reactions() -> Reactions {
             } else {
                 p.ores.robot_dir.turn_left();
             }
-            p.require_pause(0.05);
+            // p.require_pause(0.03);
             Ok(vec![ Constant::Boolean(true) ])
         } as _
     );
@@ -184,7 +184,7 @@ pub fn build_reactions() -> Reactions {
         |p: &mut Peripherals, args: &LuaList| -> InvResult {
             read_or_bail!([] = args);
             p.ores.robot_dir.turn_around();
-            p.require_pause(0.05);
+            p.require_pause(0.03);
             Ok(vec![ Constant::Boolean(true) ])
         } as _
     );
@@ -206,7 +206,7 @@ pub fn build_reactions() -> Reactions {
                 None    => Ok(vec![Constant::Boolean(false)]),
                 Some(broke_block) => {
                     if broke_block.is_tough() {
-                        p.require_pause(0.1);
+                        p.require_pause(0.03);
                     }
                     Ok(vec![
                         Constant::Boolean(true),
@@ -214,6 +214,20 @@ pub fn build_reactions() -> Reactions {
                     ])
                 },
             }
+        } as _
+    );
+    
+    reactions.insert(
+        ("$robot".to_owned(), "robot.hidden$compareAir".to_owned()),
+        |p: &mut Peripherals, args: &LuaList| -> InvResult {
+            let dir = lua_direction(p, args)?;
+            let faced = p.ores.robot_faces(Some(dir)).map(|p| &*p.0);
+            
+            let template = &crate::block_registry::Voxel::Air;
+            
+            Ok(vec![
+                Constant::Boolean(faced == Some(template))
+            ])
         } as _
     );
     

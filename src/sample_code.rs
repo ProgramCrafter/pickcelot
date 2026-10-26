@@ -42,9 +42,12 @@ do_init = function()
         space = function() return math.huge end,
         drop = function() return false end,
         dropDown = function() return false end,
-        detectUp = function() return true, 'solid' end,
-        detect = function() return true, 'solid' end,
-        detectDown = function() return true, 'solid' end,
+        detectUp = function() return
+            not piccolo_component_invoke('$robot', 'robot.hidden$compareAir', sides.up), 'solid' end,
+        detect = function() return
+            not piccolo_component_invoke('$robot', 'robot.hidden$compareAir', sides.front), 'solid' end,
+        detectDown = function() return
+            not piccolo_component_invoke('$robot', 'robot.hidden$compareAir', sides.down), 'solid' end,
         compareUp = function() return
             piccolo_component_invoke('$robot', 'robot.hidden$compareRocks', sides.up) end,
         compare = function() return
@@ -76,7 +79,7 @@ do_init = function()
         piccolo_component_invoke('$gpu', 'gpu.set', 1, print_y, s, false)
     end
     
-    tonumber = function() return nil end
+    tonumber = tonumber or function() return nil end
     
     do_init = nil
 end
@@ -101,9 +104,9 @@ end
 local gen = trytoload("generator")
 local cloader = trytoload("chunkloader")
 
-TECH_SLOTS = 6
+TECH_SLOTS = 3
 VANILLA_CHEST = true
-PATHWAYS = true
+PATHWAYS = false
 DROP_TRASH = false
 DEAD_END = 30
 USE_CLOADER = true
@@ -270,7 +273,8 @@ end
 
 -- ================================ M I N I N G ================================== --
 function qforward()
-  while not forward() do robot.swing() end
+  -- while not forward() do robot.swing() end
+  while not forward() and robot.swing() do end
 end
 
 function trash(side)

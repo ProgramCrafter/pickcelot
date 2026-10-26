@@ -38,13 +38,13 @@ impl Default for App {
                 exec.fuel().interrupt();
                 Ok(CallbackReturn::Return)
             });
-            _ = ctx.set_global("piccolo_yield", piccolo_yield).unwrap();
+            ctx.set_global("piccolo_yield", piccolo_yield);
             
             let ci = Callback::from_fn(&ctx, |ctx, _, mut stack| {
                 ComponentInvoke::make(ctx, &mut stack)?;
                 Ok(CallbackReturn::Yield {to_thread: None, then: None})
             });
-            _ = ctx.set_global("piccolo_component_invoke", ci).unwrap();
+            ctx.set_global("piccolo_component_invoke", ci);
             
             let cl = Closure::load(ctx, None, LUA_CODE).unwrap();
             let ex = Executor::start(ctx, cl.into(), ());
@@ -84,7 +84,7 @@ impl eframe::App for App {
             
             let ex = ctx.fetch(&self.engine);
             let mut fuel = Fuel::with(4096 * 30);
-            while ex.step(ctx, &mut fuel) {
+            while ex.step(ctx, &mut fuel).expect("wrong state") {
                 let request = ex
                     .take_result::<piccolo::UserData>(ctx)
                     .map(|ok_mode| ok_mode.map(
