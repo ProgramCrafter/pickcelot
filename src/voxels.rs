@@ -118,7 +118,7 @@ impl<const S: usize> Chunk<S> {
             for y in 0..S {
                 for x in 0..S {
                     let (x0, y0, z0) = self.robot_cut;
-                    let transparent = (x0 <= x) | (y0 <= y) | (z0 <= z);
+                    let transparent = (x0 < x) | (y0 < y) | (z0 < z);
                     
                     painter(x as f32, y as f32, z as f32, transparent,
                             &self.blocks[z][y][x]);
@@ -163,14 +163,28 @@ impl<const S: usize> Widget for &Chunk<S> {
             
             let back_corner = center + v * x + u * y + w * z;
             let mesh = epaint::PathShape::convex_polygon(
-                vec![back_corner + u, back_corner + u + v,
-                     back_corner + v, back_corner - u,
-                     back_corner + w, back_corner + w + u],
+                vec![back_corner + u, back_corner + u + w,
+                     back_corner + w, back_corner - u,
+                     back_corner + v, back_corner + v + u],
                 color,
                 epaint::PathStroke::NONE
             );
             
             painter.add(mesh);
+            if !transparent {
+                painter.add(epaint::PathShape::convex_polygon(
+                    vec![back_corner, back_corner + w + u,
+                         back_corner + w, back_corner - u],
+                    Color32::from_black_alpha(12),
+                    epaint::PathStroke::NONE
+                ));
+                painter.add(epaint::PathShape::convex_polygon(
+                    vec![back_corner, back_corner - u,
+                         back_corner + v, back_corner + u + v],
+                    Color32::from_white_alpha(7),
+                    epaint::PathStroke::NONE
+                ));
+            }
         });
         
         let (rx, ry, rz) = self.robot_cut;
