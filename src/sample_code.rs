@@ -121,287 +121,236 @@ do_init()
 
 
 
+-- ==================== Mining Program ====================
 
 local r = require('robot')
 
--- Horizontal orientation:
--- 0 = front, 1 = right, 2 = back, 3 = left
-local facing = 0
+local facing = 0 -- 0 = North (-z), 1 = East (+x), 2 = South (+z), 3 = West (-x)
+local x, y, z = 0, 0, 0
 
-local x = 0
-local y = 0
-local z = 0
-
-local visited = {}
-local oreMined = 0
-local trashMined = 0
-
-local dirs = {
-    { dx = 0, dz = -1, kind = 0 },
-    { dx = 1, dz = 0, kind = 1 },
-    { dx = 0, dz = 1, kind = 2 },
-    { dx = -1, dz = 0, kind = 3 }
-}
-
-local function key(px, py, pz)
-    return px .. ":" .. py .. ":" .. pz
-end
-
-local function turnTo(direction)
-    local delta = (direction - facing) % 4
-
-    if delta == 1 then
+local function turnTo(target)
+    local diff = (target - facing) % 4
+    if diff == 1 then
         r.turnRight()
-    elseif delta == 2 then
+    elseif diff == 2 then
         r.turnAround()
-    elseif delta == 3 then
+    elseif diff == 3 then
         r.turnLeft()
     end
-
-    facing = direction
+    facing = target
 end
 
-local function moveHorizontal(direction)
-    turnTo(direction)
-
-    local ok = r.forward()
-
-    if ok then
-        if direction == 0 then
-            z = z - 1
-        elseif direction == 1 then
-            x = x + 1
-        elseif direction == 2 then
-            z = z + 1
-        else
-            x = x - 1
-        end
-    end
-
-    return ok
-end
-
-local function moveVertical(amount)
-    local ok
-
-    if amount > 0 then
-        ok = r.up()
-    else
-        ok = r.down()
-    end
-
-    if ok then
-        y = y + amount
-    end
-
-    return ok
-end
-
-local function horizontalDetect(direction)
-    turnTo(direction)
-    return r.detect()
-end
-
-local function horizontalCompare(direction)
-    turnTo(direction)
-    return r.compare()
-end
-
-local function horizontalSwing(direction)
-    turnTo(direction)
-    return r.swing()
-end
-
-local function mineVerticalRun()
-    -- Mine the complete ore run upward, then return.
-    local moved = 0
-
-    while r.detectUp() and not r.compareUp() do
-        local dug = r.swingUp()
-
-        if not dug then
-            break
-        end
-
-        if not moveVertical(1) then
-            break
-        end
-
-        moved = moved + 1
-        oreMined = oreMined + 1
-    end
-
-    while moved > 0 do
-        moveVertical(-1)
-        moved = moved - 1
-    end
-
-    -- Mine the complete ore run downward, then return.
-    moved = 0
-
-    while r.detectDown() and not r.compareDown() do
-        local dug = r.swingDown()
-
-        if not dug then
-            break
-        end
-
-        if not moveVertical(-1) then
-            break
-        end
-
-        moved = moved + 1
-        oreMined = oreMined + 1
-    end
-
-    while moved > 0 do
-        moveVertical(1)
-        moved = moved - 1
-    end
-end
-
-local function mineOre(direction)
-    if direction == 4 then
-        if not r.detectUp() or r.compareUp() then
-            return false
-        end
-
-        if not r.swingUp() then
-            return false
-        end
-
-        if not moveVertical(1) then
-            return false
-        end
-
-        oreMined = oreMined + 1
-        mineVerticalRun()
-        moveVertical(-1)
+local function moveForward()
+    if r.forward() then
+        if facing == 0 then z = z - 1
+        elseif facing == 1 then x = x + 1
+        elseif facing == 2 then z = z + 1
+        elseif facing == 3 then x = x - 1 end
         return true
     end
+    return false
+end
 
-    if direction == 5 then
-        if not r.detectDown() or r.compareDown() then
-            return false
-        end
-
-        if not r.swingDown() then
-            return false
-        end
-
-        if not moveVertical(-1) then
-            return false
-        end
-
-        oreMined = oreMined + 1
-        mineVerticalRun()
-        moveVertical(1)
+local function moveUp()
+    if r.up() then
+        y = y + 1
         return true
     end
-
-    if not horizontalDetect(direction) then
-        return false
-    end
-
-    if horizontalCompare(direction) then
-        return false
-    end
-
-    if not horizontalSwing(direction) then
-        return false
-    end
-
-    if not moveHorizontal(direction) then
-        return false
-    end
-
-    oreMined = oreMined + 1
-    mineVerticalRun()
-    moveHorizontal((direction + 2) % 4)
-
-    return true
+    return false
 end
 
-local function enterTrash(direction)
-    if not horizontalDetect(direction) then
-        return false
+local function moveDown()
+    if r.down() then
+        y = y - 1
+        return true
     end
-
-    if not horizontalCompare(direction) then
-        return false
-    end
-
-    -- A failed swing means that the block is an unbreakable boundary,
-    -- such as bedrock. Do not enter it.
-    if not horizontalSwing(direction) then
-        return false
-    end
-
-    if not moveHorizontal(direction) then
-        return false
-    end
-
-    trashMined = trashMined + 1
-    return true
+    return false
 end
 
-local function explore()
-    local here = key(x, y, z)
+local function cellKey(cx, cy, cz)
+    return cx .. ":" .. cy .. ":" .. cz
+end
 
-    if visited[here] then
-        return
+local function colKey(cx, cz)
+    return cx .. ":" .. cz
+end
+
+local visited3D = {}
+local minedCol = {}
+local planeVisited = {}
+
+local maxOreY = 0
+local bestUpElevator = nil
+
+local minOreY = 0
+local bestDownElevator = nil
+
+-- 3D recursive flood-fill across all connected ore blocks (costs 0 trash)
+local function exploreOre3D()
+    visited3D[cellKey(x, y, z)] = true
+    minedCol[colKey(x, z)] = true
+
+    if y > maxOreY then
+        maxOreY = y
+        bestUpElevator = {x = x, z = z, targetY = y}
+    end
+    if y < minOreY then
+        minOreY = y
+        bestDownElevator = {x = x, z = z, targetY = y}
     end
 
-    visited[here] = true
-
-    -- First mine every immediately visible ore block.
-    -- Vertical continuation is mined automatically.
-    local d
-
-    for d = 0, 3 do
-        mineOre(d)
+    -- 1. Check UP for ore
+    local upK = cellKey(x, y + 1, z)
+    if not visited3D[upK] and r.detectUp() and not r.compareUp() then
+        if r.swingUp() and moveUp() then
+            exploreOre3D()
+            moveDown()
+        end
     end
 
-    mineOre(4)
-    mineOre(5)
+    -- 2. Check DOWN for ore
+    local downK = cellKey(x, y - 1, z)
+    if not visited3D[downK] and r.detectDown() and not r.compareDown() then
+        if r.swingDown() and moveDown() then
+            exploreOre3D()
+            moveUp()
+        end
+    end
 
-    -- Explore already open horizontal cells before digging trash.
+    -- 3. Check 4 horizontal neighbors for ore
     for d = 0, 3 do
-        if not horizontalDetect(d) then
-            local oldX = x
-            local oldY = y
-            local oldZ = z
+        local dx = (d == 1 and 1) or (d == 3 and -1) or 0
+        local dz = (d == 2 and 1) or (d == 0 and -1) or 0
+        local hK = cellKey(x + dx, y, z + dz)
 
-            if moveHorizontal(d) then
-                explore()
-                moveHorizontal((d + 2) % 4)
+        if not visited3D[hK] then
+            turnTo(d)
+            if r.detect() and not r.compare() then
+                if r.swing() and moveForward() then
+                    exploreOre3D()
+                    turnTo((d + 2) % 4)
+                    moveForward()
+                end
+            end
+        end
+    end
+end
 
-                x = oldX
-                y = oldY
-                z = oldZ
+-- Primary 2D plane exploration with connected ore flood-fill
+local function explorePlane(skipSpokenColumns)
+    local ck = colKey(x, z)
+    planeVisited[ck] = true
+
+    -- Fully mine any 3D connected ore component reachable from this cell for 0 trash
+    exploreOre3D()
+
+    for d = 0, 3 do
+        local dx = (d == 1 and 1) or (d == 3 and -1) or 0
+        local dz = (d == 2 and 1) or (d == 0 and -1) or 0
+        local nCol = colKey(x + dx, z + dz)
+
+        if not planeVisited[nCol] then
+            turnTo(d)
+            local canEnter = false
+
+            if not r.detect() then
+                -- Air: zero trash cost
+                canEnter = true
+            elseif not r.compare() then
+                -- Ore: free to mine
+                if r.swing() then
+                    canEnter = true
+                end
+            else
+                -- Trash block.
+                -- If the column was already spoken for (its ore run mined from another height),
+                -- we avoid digging trash in that column if instructed.
+                if skipSpokenColumns and minedCol[nCol] then
+                    canEnter = false
+                else
+                    if r.swing() then
+                        canEnter = true
+                    else
+                        -- Bedrock boundary
+                        planeVisited[nCol] = true
+                    end
+                end
+            end
+
+            if canEnter and moveForward() then
+                explorePlane(skipSpokenColumns)
+                turnTo((d + 2) % 4)
+                moveForward()
+            end
+        end
+    end
+end
+
+-- Navigate safely along already-cleared empty air cells on the base plane
+local function goTo(targetX, targetZ)
+    if x == targetX and z == targetZ then return true end
+    local q = {{x = x, z = z}}
+    local parent = {}
+    local pvisited = {[colKey(x, z)] = true}
+
+    while #q > 0 do
+        local curr = table.remove(q, 1)
+        if curr.x == targetX and curr.z == targetZ then break end
+
+        for d = 0, 3 do
+            local dx = (d == 1 and 1) or (d == 3 and -1) or 0
+            local dz = (d == 2 and 1) or (d == 0 and -1) or 0
+            local nx, nz = curr.x + dx, curr.z + dz
+            local nk = colKey(nx, nz)
+
+            if planeVisited[nk] and not pvisited[nk] then
+                pvisited[nk] = true
+                parent[nk] = {x = curr.x, z = curr.z, dir = d}
+                table.insert(q, {x = nx, z = nz})
             end
         end
     end
 
-    -- Only open trash horizontally. This avoids wasting blocks above or
-    -- below a column; once ore is found, its entire vertical run is mined.
-    for d = 0, 3 do
-        local oldX = x
-        local oldY = y
-        local oldZ = z
-
-        if enterTrash(d) then
-            explore()
-            moveHorizontal((d + 2) % 4)
-
-            x = oldX
-            y = oldY
-            z = oldZ
-        end
+    local path = {}
+    local curr = {x = targetX, z = targetZ}
+    while parent[colKey(curr.x, curr.z)] do
+        local p = parent[colKey(curr.x, curr.z)]
+        table.insert(path, 1, p.dir)
+        curr = {x = p.x, z = p.z}
     end
+
+    for _, d in ipairs(path) do
+        turnTo(d)
+        moveForward()
+    end
+    return true
 end
 
-explore()
+-- Phase 1: Explore spawning plane (y = 0) while propagating 3D ore veins
+explorePlane(true)
+
+-- Phase 2: If a high-reaching ore vein formed a hollow vertical air shaft,
+-- use it as a 0-trash elevator to catch upper disjoint veins without re-digging spoken columns
+if bestUpElevator and bestUpElevator.targetY >= 4 then
+    goTo(bestUpElevator.x, bestUpElevator.z)
+    for _ = 1, bestUpElevator.targetY do moveUp() end
+
+    explorePlane(true)
+
+    for _ = 1, bestUpElevator.targetY do moveDown() end
+    goTo(0, 0)
+end
+
+-- Phase 3: Check bottom disjoint veins through any deep downward hollow vein shaft
+if bestDownElevator and bestDownElevator.targetY <= -4 then
+    goTo(bestDownElevator.x, bestDownElevator.z)
+    for _ = 1, -bestDownElevator.targetY do moveDown() end
+
+    explorePlane(true)
+
+    for _ = 1, -bestDownElevator.targetY do moveUp() end
+    goTo(0, 0)
+end
 
 
 
