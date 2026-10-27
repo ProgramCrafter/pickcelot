@@ -123,234 +123,307 @@ do_init()
 
 -- ==================== Mining Program ====================
 
-local r = require('robot')
+do
+    local r = require('robot')
 
-local facing = 0 -- 0 = North (-z), 1 = East (+x), 2 = South (+z), 3 = West (-x)
-local x, y, z = 0, 0, 0
+    local PLANE_STEP = 4
 
-local function turnTo(target)
-    local diff = (target - facing) % 4
-    if diff == 1 then
-        r.turnRight()
-    elseif diff == 2 then
-        r.turnAround()
-    elseif diff == 3 then
-        r.turnLeft()
-    end
-    facing = target
-end
+    -- State encapsulated entirely within closure
+    local state = {
+        x = 0,
+        y = 0,
+        z = 0,
+        facing = 0, -- 0 = North (-z), 1 = East (+x), 2 = South (+z), 3 = West (-x)
+        visited3D = {},
+        minedCol = {},
+        clearedOnPlane = {}
+    }
 
-local function moveForward()
-    if r.forward() then
-        if facing == 0 then z = z - 1
-        elseif facing == 1 then x = x + 1
-        elseif facing == 2 then z = z + 1
-        elseif facing == 3 then x = x - 1 end
-        return true
-    end
-    return false
-end
-
-local function moveUp()
-    if r.up() then
-        y = y + 1
-        return true
-    end
-    return false
-end
-
-local function moveDown()
-    if r.down() then
-        y = y - 1
-        return true
-    end
-    return false
-end
-
-local function cellKey(cx, cy, cz)
-    return cx .. ":" .. cy .. ":" .. cz
-end
-
-local function colKey(cx, cz)
-    return cx .. ":" .. cz
-end
-
-local visited3D = {}
-local minedCol = {}
-local planeVisited = {}
-
-local maxOreY = 0
-local bestUpElevator = nil
-
-local minOreY = 0
-local bestDownElevator = nil
-
--- 3D recursive flood-fill across all connected ore blocks (costs 0 trash)
-local function exploreOre3D()
-    visited3D[cellKey(x, y, z)] = true
-    minedCol[colKey(x, z)] = true
-
-    if y > maxOreY then
-        maxOreY = y
-        bestUpElevator = {x = x, z = z, targetY = y}
-    end
-    if y < minOreY then
-        minOreY = y
-        bestDownElevator = {x = x, z = z, targetY = y}
+    local function cellKey(cx, cy, cz)
+        return cx .. ":" .. cy .. ":" .. cz
     end
 
-    -- 1. Check UP for ore
-    local upK = cellKey(x, y + 1, z)
-    if not visited3D[upK] and r.detectUp() and not r.compareUp() then
-        if r.swingUp() and moveUp() then
-            exploreOre3D()
-            moveDown()
+    local function colKey(cx, cz)
+        return cx .. ":" .. cz
+    end
+
+    local function turnTo(target)
+        local diff = (target - state.facing) % 4
+        if diff == 1 then
+            r.turnRight()
+        elseif diff == 2 then
+            r.turnAround()
+        elseif diff == 3 then
+            r.turnLeft()
         end
+        state.facing = target
     end
 
-    -- 2. Check DOWN for ore
-    local downK = cellKey(x, y - 1, z)
-    if not visited3D[downK] and r.detectDown() and not r.compareDown() then
-        if r.swingDown() and moveDown() then
-            exploreOre3D()
-            moveUp()
+    local function moveForward()
+        if r.forward() then
+            if state.facing == 0 then state.z = state.z - 1
+            elseif state.facing == 1 then state.x = state.x + 1
+            elseif state.facing == 2 then state.z = state.z + 1
+            elseif state.facing == 3 then state.x = state.x - 1 end
+            return true
         end
+        return false
     end
 
-    -- 3. Check 4 horizontal neighbors for ore
-    for d = 0, 3 do
-        local dx = (d == 1 and 1) or (d == 3 and -1) or 0
-        local dz = (d == 2 and 1) or (d == 0 and -1) or 0
-        local hK = cellKey(x + dx, y, z + dz)
+    local function moveUp()
+        if r.up() then
+            state.y = state.y + 1
+            return true
+        end
+        return false
+    end
 
-        if not visited3D[hK] then
+    local function moveDown()
+        if r.down() then
+            state.y = state.y - 1
+            return true
+        end
+        return false
+    end
+
+    -- BFS pathfinder strictly across already cleared air cells on plane Y
+    local function goToOnPlane(targetX, targetZ, planeY)
+        if state.x == targetX and state.z == targetZ then return true end
+
+        local cleared = state.clearedOnPlane[planeY] or {}
+        local q = {{x = state.x, z = state.z}}
+        local parent = {}
+        local pvisited = {[colKey(state.x, state.z)] = true}
+
+        while #q > 0 do
+            local curr = table.remove(q, 1)
+            if curr.x == targetX and curr.z == targetZ then break end
+
+            for d = 0, 3 do
+                local dx = (d == 1 and 1) or (d == 3 and -1) or 0
+                local dz = (d == 2 and 1) or (d == 0 and -1) or 0
+                local nx, nz = curr.x + dx, curr.z + dz
+                local nk = colKey(nx, nz)
+
+                if cleared[nk] and not pvisited[nk] then
+                    pvisited[nk] = true
+                    parent[nk] = {x = curr.x, z = curr.z, dir = d}
+                    table.insert(q, {x = nx, z = nz})
+                end
+            end
+        end
+
+        local path = {}
+        local curr = {x = targetX, z = targetZ}
+        while parent[colKey(curr.x, curr.z)] do
+            local p = parent[colKey(curr.x, curr.z)]
+            table.insert(path, 1, p.dir)
+            curr = {x = p.x, z = p.z}
+        end
+
+        for _, d in ipairs(path) do
             turnTo(d)
-            if r.detect() and not r.compare() then
-                if r.swing() and moveForward() then
-                    exploreOre3D()
+            if not moveForward() then return false end
+        end
+        return true
+    end
+
+    -- 3D flood-fill through connected ore blocks (costs 0 trash)
+    local function exploreOre3D(stats)
+        local ck = cellKey(state.x, state.y, state.z)
+        state.visited3D[ck] = true
+        state.minedCol[colKey(state.x, state.z)] = true
+
+        if stats then
+            if state.y > stats.maxY then
+                stats.maxY = state.y
+                stats.bestUpX = state.x
+                stats.bestUpZ = state.z
+            end
+            if state.y < stats.minY then
+                stats.minY = state.y
+                stats.bestDownX = state.x
+                stats.bestDownZ = state.z
+            end
+        end
+
+        -- Check UP for ore
+        local upK = cellKey(state.x, state.y + 1, state.z)
+        if not state.visited3D[upK] and r.detectUp() and not r.compareUp() then
+            if r.swingUp() and moveUp() then
+                exploreOre3D(stats)
+                moveDown()
+            end
+        end
+
+        -- Check DOWN for ore
+        local downK = cellKey(state.x, state.y - 1, state.z)
+        if not state.visited3D[downK] and r.detectDown() and not r.compareDown() then
+            if r.swingDown() and moveDown() then
+                exploreOre3D(stats)
+                moveUp()
+            end
+        end
+
+        -- Check 4 horizontal neighbors for ore
+        for d = 0, 3 do
+            local dx = (d == 1 and 1) or (d == 3 and -1) or 0
+            local dz = (d == 2 and 1) or (d == 0 and -1) or 0
+            local hK = cellKey(state.x + dx, state.y, state.z + dz)
+
+            if not state.visited3D[hK] then
+                turnTo(d)
+                if r.detect() and not r.compare() then
+                    if r.swing() and moveForward() then
+                        exploreOre3D(stats)
+                        turnTo((d + 2) % 4)
+                        moveForward()
+                    end
+                end
+            end
+        end
+    end
+
+    -- 2D DFS exploration of plane Y, skipping columns whose ore runs were already mined
+    local function explorePlane(planeY, stats)
+        if not state.clearedOnPlane[planeY] then
+            state.clearedOnPlane[planeY] = {}
+        end
+
+        local ck = colKey(state.x, state.z)
+        state.clearedOnPlane[planeY][ck] = true
+
+        -- Flood-fill all 3D connected ore reachable from here
+        exploreOre3D(stats)
+
+        for d = 0, 3 do
+            local dx = (d == 1 and 1) or (d == 3 and -1) or 0
+            local dz = (d == 2 and 1) or (d == 0 and -1) or 0
+            local nCol = colKey(state.x + dx, state.z + dz)
+
+            if not state.clearedOnPlane[planeY][nCol] then
+                turnTo(d)
+                local canEnter = false
+
+                if not r.detect() then
+                    -- Empty air
+                    canEnter = true
+                elseif not r.compare() then
+                    -- Ore block
+                    if r.swing() then
+                        canEnter = true
+                    end
+                else
+                    -- Trash block
+                    -- If this column's ore was already spoken for, do not dig trash here
+                    if not state.minedCol[nCol] then
+                        if r.swing() then
+                            canEnter = true
+                        else
+                            -- Solid bedrock boundary
+                            state.clearedOnPlane[planeY][nCol] = true
+                        end
+                    end
+                end
+
+                if canEnter and moveForward() then
+                    explorePlane(planeY, stats)
                     turnTo((d + 2) % 4)
                     moveForward()
                 end
             end
         end
     end
-end
 
--- Primary 2D plane exploration with connected ore flood-fill
-local function explorePlane(skipSpokenColumns)
-    local ck = colKey(x, z)
-    planeVisited[ck] = true
-
-    -- Fully mine any 3D connected ore component reachable from this cell for 0 trash
-    exploreOre3D()
-
-    for d = 0, 3 do
-        local dx = (d == 1 and 1) or (d == 3 and -1) or 0
-        local dz = (d == 2 and 1) or (d == 0 and -1) or 0
-        local nCol = colKey(x + dx, z + dz)
-
-        if not planeVisited[nCol] then
-            turnTo(d)
-            local canEnter = false
-
-            if not r.detect() then
-                -- Air: zero trash cost
-                canEnter = true
-            elseif not r.compare() then
-                -- Ore: free to mine
-                if r.swing() then
-                    canEnter = true
-                end
+    -- Ascend towards targetY. Follows air shafts where available,
+    -- and digs through trash if a full elevator is not found.
+    local function ascendTo(targetY)
+        local moved = 0
+        while state.y < targetY do
+            if not r.detectUp() then
+                if not moveUp() then break end
+                moved = moved + 1
             else
-                -- Trash block.
-                -- If the column was already spoken for (its ore run mined from another height),
-                -- we avoid digging trash in that column if instructed.
-                if skipSpokenColumns and minedCol[nCol] then
-                    canEnter = false
-                else
-                    if r.swing() then
-                        canEnter = true
-                    else
-                        -- Bedrock boundary
-                        planeVisited[nCol] = true
-                    end
-                end
-            end
-
-            if canEnter and moveForward() then
-                explorePlane(skipSpokenColumns)
-                turnTo((d + 2) % 4)
-                moveForward()
+                if not r.swingUp() then break end -- bedrock boundary reached
+                if not moveUp() then break end
+                moved = moved + 1
             end
         end
+        return moved
     end
-end
 
--- Navigate safely along already-cleared empty air cells on the base plane
-local function goTo(targetX, targetZ)
-    if x == targetX and z == targetZ then return true end
-    local q = {{x = x, z = z}}
-    local parent = {}
-    local pvisited = {[colKey(x, z)] = true}
-
-    while #q > 0 do
-        local curr = table.remove(q, 1)
-        if curr.x == targetX and curr.z == targetZ then break end
-
-        for d = 0, 3 do
-            local dx = (d == 1 and 1) or (d == 3 and -1) or 0
-            local dz = (d == 2 and 1) or (d == 0 and -1) or 0
-            local nx, nz = curr.x + dx, curr.z + dz
-            local nk = colKey(nx, nz)
-
-            if planeVisited[nk] and not pvisited[nk] then
-                pvisited[nk] = true
-                parent[nk] = {x = curr.x, z = curr.z, dir = d}
-                table.insert(q, {x = nx, z = nz})
+    -- Descend towards targetY. Follows air shafts where available,
+    -- and digs through trash if a full elevator is not found.
+    local function descendTo(targetY)
+        local moved = 0
+        while state.y > targetY do
+            if not r.detectDown() then
+                if not moveDown() then break end
+                moved = moved + 1
+            else
+                if not r.swingDown() then break end -- bedrock boundary reached
+                if not moveDown() then break end
+                moved = moved + 1
             end
+        end
+        return moved
+    end
+
+    -- Recursive multi-stratum explorer (supports arbitrarily large heights)
+    local function exploreStratum(planeY, canAscend, canDescend)
+        local stats = {
+            maxY = planeY,
+            bestUpX = state.x,
+            bestUpZ = state.z,
+            minY = planeY,
+            bestDownX = state.x,
+            bestDownZ = state.z
+        }
+
+        local startX, startZ = state.x, state.z
+
+        -- 1. Explore current horizontal plane and harvest all connected ore runs
+        explorePlane(planeY, stats)
+
+        -- 2. Recursively ascend to upper plane
+        if canAscend then
+            local nextUpY = planeY + PLANE_STEP
+            local elevatorX = stats.bestUpX or startX
+            local elevatorZ = stats.bestUpZ or startZ
+
+            goToOnPlane(elevatorX, elevatorZ, planeY)
+
+            local climbed = ascendTo(nextUpY)
+            if state.y > planeY then
+                exploreStratum(state.y, true, false)
+                for _ = 1, climbed do moveDown() end
+            end
+
+            goToOnPlane(startX, startZ, planeY)
+        end
+
+        -- 3. Recursively descend to lower plane
+        if canDescend then
+            local nextDownY = planeY - PLANE_STEP
+            local elevatorX = stats.bestDownX or startX
+            local elevatorZ = stats.bestDownZ or startZ
+
+            goToOnPlane(elevatorX, elevatorZ, planeY)
+
+            local dropped = descendTo(nextDownY)
+            if state.y < planeY then
+                exploreStratum(state.y, false, true)
+                for _ = 1, dropped do moveUp() end
+            end
+
+            goToOnPlane(startX, startZ, planeY)
         end
     end
 
-    local path = {}
-    local curr = {x = targetX, z = targetZ}
-    while parent[colKey(curr.x, curr.z)] do
-        local p = parent[colKey(curr.x, curr.z)]
-        table.insert(path, 1, p.dir)
-        curr = {x = p.x, z = p.z}
-    end
-
-    for _, d in ipairs(path) do
-        turnTo(d)
-        moveForward()
-    end
-    return true
+    -- Start recursive exploration from initial spawning position
+    exploreStratum(0, true, true)
 end
 
--- Phase 1: Explore spawning plane (y = 0) while propagating 3D ore veins
-explorePlane(true)
-
--- Phase 2: If a high-reaching ore vein formed a hollow vertical air shaft,
--- use it as a 0-trash elevator to catch upper disjoint veins without re-digging spoken columns
-if bestUpElevator and bestUpElevator.targetY >= 4 then
-    goTo(bestUpElevator.x, bestUpElevator.z)
-    for _ = 1, bestUpElevator.targetY do moveUp() end
-
-    explorePlane(true)
-
-    for _ = 1, bestUpElevator.targetY do moveDown() end
-    goTo(0, 0)
-end
-
--- Phase 3: Check bottom disjoint veins through any deep downward hollow vein shaft
-if bestDownElevator and bestDownElevator.targetY <= -4 then
-    goTo(bestDownElevator.x, bestDownElevator.z)
-    for _ = 1, -bestDownElevator.targetY do moveDown() end
-
-    explorePlane(true)
-
-    for _ = 1, -bestDownElevator.targetY do moveUp() end
-    goTo(0, 0)
-end
 
 
 

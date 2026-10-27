@@ -120,6 +120,15 @@ impl<const S: usize> Chunk<S> {
                     let (x0, y0, z0) = self.robot_cut;
                     let transparent = (x0 < x) | (y0 < y) | (z0 < z);
                     
+                    if x < S-1 && y < S-1 && z < S-1 {
+                        let cov_transpt = (x0 < x+1) | (y0 < y+1) | (z0 < z+1);
+                        if !cov_transpt {
+                            if self.blocks[z+1][y+1][x+1].is_tough() {
+                                continue;
+                            }
+                        }
+                    }
+                    
                     painter(x as f32, y as f32, z as f32, transparent,
                             &self.blocks[z][y][x]);
                 }
@@ -158,7 +167,7 @@ impl<const S: usize> Widget for &Chunk<S> {
         self.draw_callback(|x, y, z, transparent, voxel| {
             let Some(mut color) = crate::block_colors::c(voxel) else { return };
             if transparent {
-                color = color.gamma_multiply(0.13);
+                color = color.gamma_multiply(0.1);
             }
             
             let back_corner = center + v * x + u * y + w * z;

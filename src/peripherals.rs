@@ -15,7 +15,7 @@ pub struct Peripherals {
     pub sleep:  f64,
     pub timer:  f64,
     
-    pub ores:   crate::voxels::Chunk<16>,
+    pub ores:   crate::voxels::Chunk<32>,
 }
 
 impl Peripherals {
