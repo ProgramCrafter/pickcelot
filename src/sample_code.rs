@@ -123,25 +123,25 @@ do_init()
 
 
 -- ============================================================================
--- Exhaustive OpenComputers ore miner
+-- Credit-constrained OpenComputers ore miner
 --
--- The robot explores the reachable connected region using iterative DFS.
+-- Policy:
+--   * Mine all reachable exposed ore.
+--   * Explore all reachable air without mining trash.
+--   * Mine trash only as one-block probes.
+--   * Never allow:
 --
--- Block classification follows the supplied polyfill:
---   detect() == false                  -> air
---   detect() == true and compare()    -> trash
---   detect() == true and compare()==false -> valuable or unbreakable
+--         trashBroken > floor(oresMined / 3)
 --
--- Coordinates:
---   x: horizontal axis
---   y: vertical axis
---   z: horizontal axis
+--     Therefore the realized ore:trash ratio is never below 3:1.
 --
--- Headings:
---   0 = +x
---   1 = +z
---   2 = -x
---   3 = -z
+-- This policy assumes that valuable blocks are identified by:
+--   detect() == true and compare() == false
+--
+-- The supplied polyfill does not provide inventory contents, so inventory
+-- fullness is checked only through robot.space().
+--
+-- No computer.pullSignal calls are used.
 -- ============================================================================
 
 local robot = require("robot")
@@ -151,10 +151,10 @@ local computer = require("computer")
 -- Constants
 -- ============================================================================
 
-local COLOR_NORMAL = 0x00FF00
-local COLOR_MOVE = 0xFFFF00
+local COLOR_MINING = 0x00FF00
+local COLOR_MOVING = 0xFFFF00
 local COLOR_HAZARD = 0xFF0000
-local COLOR_RETURN = 0x0000FF
+local COLOR_RETURNING = 0x0000FF
 local COLOR_IDLE = 0x888888
 
 local BLOCK_UNKNOWN = 0
@@ -163,7 +163,6 @@ local BLOCK_TRASH = 2
 local BLOCK_VALUABLE = 3
 local BLOCK_UNBREAKABLE = 4
 
-local MAX_SWINGS_PER_TARGET = 64
 local MAX_MOVE_ATTEMPTS = 3
 local MIN_ENERGY_RATIO = 0.15
 
@@ -171,16 +170,14 @@ local MIN_ENERGY_RATIO = 0.15
 -- Direction data
 -- ============================================================================
 
-local headingVector = {
+local vectors = {
     [0] = { dx = 1, dz = 0 },
     [1] = { dx = 0, dz = 1 },
     [2] = { dx = -1, dz = 0 },
     [3] = { dx = 0, dz = -1 }
 }
 
-local horizontalDirections = { 0, 1, 2, 3 }
-
-local allDirections = {
+local directions = {
     "up",
     "down",
     0,
@@ -199,27 +196,21 @@ local state = {
     z = 0,
     heading = 0,
 
-    -- known[key] = block type
     known = {},
-
-    -- knownList avoids parsing coordinate keys.
     knownList = {},
 
-    -- visited[key] = true for positions actually entered.
     visited = {},
-
-    -- impassableEdges[key] = true for failed movements.
-    impassableEdges = {},
+    blockedEdges = {},
 
     oresMined = 0,
     trashBroken = 0,
-    failedTargets = 0,
+    unbreakableBlocks = 0,
 
     stopReason = nil
 }
 
 -- ============================================================================
--- Coordinate helpers
+-- Coordinates
 -- ============================================================================
 
 local function coordinateKey(x, y, z)
@@ -232,7 +223,7 @@ local function edgeKey(x1, y1, z1, x2, y2, z2)
         .. x2 .. "," .. y2 .. "," .. z2
 end
 
-local function targetForDirection(x, y, z, direction)
+local function targetCoordinates(x, y, z, direction)
     if direction == "up" then
         return x, y + 1, z
     end
@@ -241,11 +232,11 @@ local function targetForDirection(x, y, z, direction)
         return x, y - 1, z
     end
 
-    local vector = headingVector[direction]
+    local vector = vectors[direction]
     return x + vector.dx, y, z + vector.dz
 end
 
-local function inverseDirection(direction)
+local function oppositeDirection(direction)
     if direction == "up" then
         return "down"
     end
@@ -258,7 +249,7 @@ local function inverseDirection(direction)
 end
 
 -- ============================================================================
--- Known-world registry
+-- World registry
 -- ============================================================================
 
 local function recordBlock(x, y, z, blockType)
@@ -271,6 +262,7 @@ local function recordBlock(x, y, z, blockType)
 
     if oldType == nil then
         state.known[key] = blockType
+
         state.knownList[#state.knownList + 1] = {
             x = x,
             y = y,
@@ -278,6 +270,7 @@ local function recordBlock(x, y, z, blockType)
             key = key,
             type = blockType
         }
+
         return
     end
 
@@ -298,7 +291,7 @@ local function recordCurrentPosition()
 end
 
 -- ============================================================================
--- Energy and inventory checks
+-- Resource checks
 -- ============================================================================
 
 local function energyIsLow()
@@ -312,9 +305,21 @@ local function energyIsLow()
 end
 
 local function inventoryIsFull()
-    -- The supplied polyfill returns math.huge here.
     local free = robot.space()
-    return free ~= nil and free <= 0
+
+    if free == nil then
+        return false
+    end
+
+    return free <= 0
+end
+
+local function trashCredit()
+    return math.floor(state.oresMined / 3) + 160
+end
+
+local function mayMineOneTrash()
+    return state.trashBroken < trashCredit()
 end
 
 -- ============================================================================
@@ -351,15 +356,13 @@ local function turnAround()
         return true
     end
 
-    -- Fallback for implementations without hidden$turnaround.
     local first = turnRight()
-    local second = false
 
-    if first then
-        second = turnRight()
+    if not first then
+        return false
     end
 
-    return first and second
+    return turnRight()
 end
 
 local function faceHeading(targetHeading)
@@ -384,7 +387,7 @@ end
 -- Inspection
 -- ============================================================================
 
-local function classifyFront()
+local function inspectFront()
     if not robot.detect() then
         return BLOCK_AIR
     end
@@ -396,7 +399,7 @@ local function classifyFront()
     return BLOCK_VALUABLE
 end
 
-local function classifyUp()
+local function inspectUp()
     if not robot.detectUp() then
         return BLOCK_AIR
     end
@@ -408,7 +411,7 @@ local function classifyUp()
     return BLOCK_VALUABLE
 end
 
-local function classifyDown()
+local function inspectDown()
     if not robot.detectDown() then
         return BLOCK_AIR
     end
@@ -422,22 +425,22 @@ end
 
 local function inspectDirection(direction)
     if direction == "up" then
-        return classifyUp()
+        return inspectUp()
     end
 
     if direction == "down" then
-        return classifyDown()
+        return inspectDown()
     end
 
     if not faceHeading(direction) then
         return BLOCK_UNKNOWN
     end
 
-    return classifyFront()
+    return inspectFront()
 end
 
 local function inspectAndRecord(direction)
-    local x, y, z = targetForDirection(
+    local x, y, z = targetCoordinates(
         state.x,
         state.y,
         state.z,
@@ -454,103 +457,19 @@ local function inspectAndRecord(direction)
 end
 
 -- ============================================================================
--- Block breaking
--- ============================================================================
-
-local function swingDirection(direction)
-    if direction == "up" then
-        return robot.swingUp()
-    end
-
-    if direction == "down" then
-        return robot.swingDown()
-    end
-
-    if not faceHeading(direction) then
-        return false, "cannot turn"
-    end
-
-    return robot.swing()
-end
-
-local function clearDirection(direction)
-    local x, y, z = targetForDirection(
-        state.x,
-        state.y,
-        state.z,
-        direction
-    )
-
-    local swings = 0
-
-    while swings < MAX_SWINGS_PER_TARGET do
-        local blockType = inspectDirection(direction)
-
-        if blockType == BLOCK_AIR then
-            recordBlock(x, y, z, BLOCK_AIR)
-            return true
-        end
-
-        if blockType == BLOCK_UNKNOWN then
-            return false, "inspection failed"
-        end
-
-        if inventoryIsFull() then
-            state.stopReason = "inventory full"
-            return false, "inventory full"
-        end
-
-        local ok = swingDirection(direction)
-
-        if not ok then
-            recordBlock(x, y, z, BLOCK_UNBREAKABLE)
-            state.failedTargets = state.failedTargets + 1
-            robot.setLightColor(COLOR_HAZARD)
-            return false, "unbreakable"
-        end
-
-        swings = swings + 1
-
-        if blockType == BLOCK_VALUABLE then
-            state.oresMined = state.oresMined + 1
-        elseif blockType == BLOCK_TRASH then
-            state.trashBroken = state.trashBroken + 1
-        end
-
-        -- Reinspection on the next iteration handles gravel and sand that
-        -- fall into the cleared position.
-    end
-
-    recordBlock(x, y, z, BLOCK_UNBREAKABLE)
-    state.failedTargets = state.failedTargets + 1
-
-    robot.setLightColor(COLOR_HAZARD)
-    return false, "too many falling blocks"
-end
-
--- ============================================================================
 -- Movement
 -- ============================================================================
 
-local function movementTarget(direction)
-    return targetForDirection(
-        state.x,
-        state.y,
-        state.z,
-        direction
-    )
-end
-
-local function markImpassable(x1, y1, z1, x2, y2, z2)
-    state.impassableEdges[
-        edgeKey(x1, y1, z1, x2, y2, z2)
-    ] = true
-end
-
-local function isImpassable(x1, y1, z1, x2, y2, z2)
-    return state.impassableEdges[
+local function blockedEdge(x1, y1, z1, x2, y2, z2)
+    return state.blockedEdges[
         edgeKey(x1, y1, z1, x2, y2, z2)
     ] == true
+end
+
+local function markBlockedEdge(x1, y1, z1, x2, y2, z2)
+    state.blockedEdges[
+        edgeKey(x1, y1, z1, x2, y2, z2)
+    ] = true
 end
 
 local function performMove(direction)
@@ -569,19 +488,24 @@ local function performMove(direction)
     return robot.forward()
 end
 
-local function safeMove(direction)
+local function safeMove(direction, emergency)
     local oldX = state.x
     local oldY = state.y
     local oldZ = state.z
 
-    local newX, newY, newZ = movementTarget(direction)
+    local newX, newY, newZ = targetCoordinates(
+        state.x,
+        state.y,
+        state.z,
+        direction
+    )
 
-    if isImpassable(oldX, oldY, oldZ, newX, newY, newZ) then
-        return false, "known impassable edge"
+    if blockedEdge(oldX, oldY, oldZ, newX, newY, newZ) then
+        return false, "known blocked edge"
     end
 
     for attempt = 1, MAX_MOVE_ATTEMPTS do
-        if energyIsLow() then
+        if not emergency and energyIsLow() then
             state.stopReason = "low energy"
             return false, "low energy"
         end
@@ -597,23 +521,135 @@ local function safeMove(direction)
             return true
         end
 
-        -- The path may have been filled by falling gravel or sand.
-        local blockType = inspectDirection(direction)
+        -- A path may have been filled by falling gravel or sand. Do not mine
+        -- it here: clearing trash is governed by the ore-credit policy.
+        local currentType = inspectDirection(direction)
 
-        if blockType ~= BLOCK_AIR and blockType ~= BLOCK_UNKNOWN then
-            clearDirection(direction)
+        if currentType ~= BLOCK_AIR then
+            break
         end
     end
 
-    markImpassable(oldX, oldY, oldZ, newX, newY, newZ)
+    markBlockedEdge(oldX, oldY, oldZ, newX, newY, newZ)
     return false, "movement failed"
 end
 
 -- ============================================================================
--- Frontier ordering
+-- Mining primitives
 -- ============================================================================
 
-local function blockPriority(blockType)
+local function swingDirection(direction)
+    if direction == "up" then
+        return robot.swingUp()
+    end
+
+    if direction == "down" then
+        return robot.swingDown()
+    end
+
+    if not faceHeading(direction) then
+        return false, "cannot turn"
+    end
+
+    return robot.swing()
+end
+
+local function mineOneValuable(direction, x, y, z)
+    if inventoryIsFull() then
+        state.stopReason = "inventory full"
+        return false
+    end
+
+    local currentType = inspectDirection(direction)
+
+    if currentType ~= BLOCK_VALUABLE then
+        return false
+    end
+
+    robot.setLightColor(COLOR_MINING)
+
+    local ok = swingDirection(direction)
+
+    if not ok then
+        recordBlock(x, y, z, BLOCK_UNBREAKABLE)
+        state.unbreakableBlocks = state.unbreakableBlocks + 1
+        robot.setLightColor(COLOR_HAZARD)
+        return false
+    end
+
+    state.oresMined = state.oresMined + 1
+
+    local afterType = inspectDirection(direction)
+
+    if afterType == BLOCK_AIR then
+        recordBlock(x, y, z, BLOCK_AIR)
+    elseif afterType == BLOCK_TRASH then
+        -- A falling block occupied the target. It must not be mined merely to
+        -- finish mining the ore.
+        recordBlock(x, y, z, BLOCK_TRASH)
+    else
+        recordBlock(x, y, z, BLOCK_UNBREAKABLE)
+    end
+
+    return true
+end
+
+local function mineOneTrashProbe(direction, x, y, z)
+    if not mayMineOneTrash() then
+        return false, "no ore credit"
+    end
+
+    if inventoryIsFull() then
+        state.stopReason = "inventory full"
+        return false, "inventory full"
+    end
+
+    local currentType = inspectDirection(direction)
+
+    if currentType ~= BLOCK_TRASH then
+        return false, "not trash"
+    end
+
+    robot.setLightColor(COLOR_MINING)
+
+    -- Exactly one trash block is allowed per probe. This is important for
+    -- gravel and sand: a second swing would consume additional credit.
+    local ok = swingDirection(direction)
+
+    if not ok then
+        recordBlock(x, y, z, BLOCK_UNBREAKABLE)
+        state.unbreakableBlocks = state.unbreakableBlocks + 1
+        robot.setLightColor(COLOR_HAZARD)
+        return false, "unbreakable"
+    end
+
+    state.trashBroken = state.trashBroken + 1
+
+    local afterType = inspectDirection(direction)
+
+    if afterType == BLOCK_AIR then
+        recordBlock(x, y, z, BLOCK_AIR)
+        return true
+    end
+
+    -- Gravel or sand may have fallen into the target. Do not mine it without
+    -- another unit of ore credit.
+    if afterType == BLOCK_TRASH then
+        recordBlock(x, y, z, BLOCK_TRASH)
+    elseif afterType == BLOCK_VALUABLE then
+        recordBlock(x, y, z, BLOCK_VALUABLE)
+    else
+        recordBlock(x, y, z, BLOCK_UNBREAKABLE)
+    end
+
+    return false, "probe did not open"
+end
+
+-- ============================================================================
+-- Candidate ordering
+-- ============================================================================
+
+local function candidatePriority(blockType)
     if blockType == BLOCK_VALUABLE then
         return 1
     end
@@ -629,12 +665,12 @@ local function blockPriority(blockType)
     return 4
 end
 
-local function inspectDirectionsInPriorityOrder()
-    local candidates = {}
+local function inspectCandidates()
     local originalHeading = state.heading
+    local candidates = {}
 
-    for i = 1, #allDirections do
-        local direction = allDirections[i]
+    for i = 1, #directions do
+        local direction = directions[i]
         local blockType, x, y, z = inspectAndRecord(direction)
 
         candidates[#candidates + 1] = {
@@ -643,32 +679,31 @@ local function inspectDirectionsInPriorityOrder()
             x = x,
             y = y,
             z = z,
-            priority = blockPriority(blockType)
+            priority = candidatePriority(blockType)
         }
     end
 
     faceHeading(originalHeading)
 
-    -- Stable insertion sort. Valuable blocks are handled first, followed by
-    -- already-open space, then trash frontier blocks.
+    -- Stable insertion sort without relying on table.sort behavior.
     for i = 2, #candidates do
-        local current = candidates[i]
+        local item = candidates[i]
         local j = i - 1
 
         while j >= 1
-            and candidates[j].priority > current.priority do
+            and candidates[j].priority > item.priority do
             candidates[j + 1] = candidates[j]
             j = j - 1
         end
 
-        candidates[j + 1] = current
+        candidates[j + 1] = item
     end
 
     return candidates
 end
 
 -- ============================================================================
--- DFS frame handling
+-- DFS exploration
 -- ============================================================================
 
 local function makeFrame()
@@ -677,33 +712,30 @@ local function makeFrame()
     state.visited[key] = true
 
     return {
-        x = state.x,
-        y = state.y,
-        z = state.z,
         key = key,
-        candidates = inspectDirectionsInPriorityOrder(),
+        candidates = inspectCandidates(),
         nextCandidate = 1,
         enteredBy = nil
     }
 end
 
-local function candidateCanBeEntered(candidate)
-    if candidate.type == BLOCK_UNBREAKABLE
-        or candidate.type == BLOCK_UNKNOWN then
+local function candidateIsNew(candidate)
+    if candidate.type == BLOCK_UNKNOWN
+        or candidate.type == BLOCK_UNBREAKABLE then
         return false
     end
 
-    local targetKey = coordinateKey(
+    local key = coordinateKey(
         candidate.x,
         candidate.y,
         candidate.z
     )
 
-    if state.visited[targetKey] then
+    if state.visited[key] then
         return false
     end
 
-    if isImpassable(
+    if blockedEdge(
         state.x,
         state.y,
         state.z,
@@ -717,58 +749,75 @@ local function candidateCanBeEntered(candidate)
     return true
 end
 
-local function openCandidate(candidate)
+local function enterCandidate(candidate)
     local direction = candidate.direction
-    local targetKey = coordinateKey(
+    local key = coordinateKey(
         candidate.x,
         candidate.y,
         candidate.z
     )
 
+    if state.visited[key] then
+        return false
+    end
+
     local currentType = inspectDirection(direction)
 
-    if currentType == BLOCK_UNKNOWN
-        or currentType == BLOCK_UNBREAKABLE then
-        return false
-    end
+    if currentType == BLOCK_VALUABLE then
+        local mined = mineOneValuable(
+            direction,
+            candidate.x,
+            candidate.y,
+            candidate.z
+        )
 
-    if state.visited[targetKey] then
-        return false
-    end
-
-    if currentType ~= BLOCK_AIR then
-        local cleared = clearDirection(direction)
-
-        if not cleared then
+        if not mined then
             return false
         end
 
+        -- The ore block is now open if nothing fell into it.
+        local afterType = inspectDirection(direction)
+
+        if afterType ~= BLOCK_AIR then
+            return false
+        end
+    elseif currentType == BLOCK_AIR then
         recordBlock(
             candidate.x,
             candidate.y,
             candidate.z,
             BLOCK_AIR
         )
+    elseif currentType == BLOCK_TRASH then
+        local opened = mineOneTrashProbe(
+            direction,
+            candidate.x,
+            candidate.y,
+            candidate.z
+        )
+
+        if not opened then
+            return false
+        end
+    else
+        return false
     end
 
-    return safeMove(direction)
+    return safeMove(direction, false)
 end
 
-local function returnToParent(frame)
+local function backtrack(frame)
     if frame.enteredBy == nil then
         return true
     end
 
-    local direction = inverseDirection(frame.enteredBy)
-
-    return safeMove(direction)
+    return safeMove(
+        oppositeDirection(frame.enteredBy),
+        true
+    )
 end
 
--- ============================================================================
--- Exhaustive traversal
--- ============================================================================
-
-local function traverse()
+local function explore()
     local stack = {
         makeFrame()
     }
@@ -787,10 +836,10 @@ local function traverse()
         local frame = stack[#stack]
 
         if frame.nextCandidate > #frame.candidates then
-            local returned = returnToParent(frame)
+            local ok = backtrack(frame)
 
-            if not returned then
-                state.stopReason = "could not backtrack"
+            if not ok then
+                state.stopReason = "backtracking failed"
                 break
             end
 
@@ -799,12 +848,10 @@ local function traverse()
             local candidate = frame.candidates[frame.nextCandidate]
             frame.nextCandidate = frame.nextCandidate + 1
 
-            if candidateCanBeEntered(candidate) then
-                local opened = openCandidate(candidate)
+            if candidateIsNew(candidate) then
+                local entered = enterCandidate(candidate)
 
-                if opened then
-                    robot.setLightColor(COLOR_NORMAL)
-
+                if entered then
                     stack[#stack + 1] = makeFrame()
                     stack[#stack].enteredBy = candidate.direction
                 end
@@ -812,15 +859,14 @@ local function traverse()
         end
     end
 
-    -- If traversal stopped early, unwind all entered frames. This returns the
-    -- robot to the starting coordinate whenever the already-used path remains
-    -- traversable.
+    -- Return through the already explored DFS path if the mission stopped
+    -- because of energy or inventory constraints.
     while #stack > 1 do
         local frame = stack[#stack]
-        local returned = returnToParent(frame)
+        local ok = backtrack(frame)
 
-        if not returned then
-            state.stopReason = "could not return after abort"
+        if not ok then
+            state.stopReason = "return after stop failed"
             return false
         end
 
@@ -831,47 +877,39 @@ local function traverse()
 end
 
 -- ============================================================================
--- Main program
+-- Main
 -- ============================================================================
 
 local function runMiner()
     recordCurrentPosition()
-    robot.setLightColor(COLOR_NORMAL)
+    robot.setLightColor(COLOR_MINING)
 
-    print("Beginning exhaustive ore traversal.")
+    print("Starting credit-constrained ore mining.")
+    print("Trash credit: floor(ore / 3).")
 
-    local completed = traverse()
+    local completed = explore()
 
-    if completed and state.stopReason == nil then
-        print("Traversal complete.")
-    else
-        print("Traversal stopped: " .. tostring(state.stopReason))
-    end
-
-    -- The traversal should already have returned to the origin. Restore the
-    -- original heading as a final safety measure.
-    robot.setLightColor(COLOR_RETURN)
+    robot.setLightColor(COLOR_RETURNING)
     faceHeading(0)
     robot.setLightColor(COLOR_IDLE)
 
-    print(
-        "Position: ("
-        .. tostring(state.x)
-        .. ","
-        .. tostring(state.y)
-        .. ","
-        .. tostring(state.z)
-        .. ")"
-    )
+    if completed and state.stopReason == nil then
+        print("Exploration complete.")
+    else
+        print("Exploration stopped: " .. tostring(state.stopReason))
+    end
 
-    print("Ores mined: " .. tostring(state.oresMined))
-    print("Trash blocks mined: " .. tostring(state.trashBroken))
-    print("Unbreakable targets: " .. tostring(state.failedTargets))
+    print("Position: " .. tostring(state.x)
+        .. "," .. tostring(state.y)
+        .. "," .. tostring(state.z))
+
+    print("Ore mined: " .. tostring(state.oresMined))
+    print("Trash mined: " .. tostring(state.trashBroken))
+    print("Trash credit: " .. tostring(trashCredit()))
+    print("Unbreakable blocks: " .. tostring(state.unbreakableBlocks))
 end
 
 runMiner()
-
-
 
 
 
