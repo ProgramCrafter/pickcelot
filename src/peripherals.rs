@@ -15,7 +15,7 @@ pub struct Peripherals {
     pub sleep:  f64,
     pub timer:  f64,
     
-    pub ores:   crate::voxels::Chunk<32>,
+    pub ores:   crate::voxels::Chunk<16>,
 }
 
 impl Peripherals {
@@ -91,10 +91,16 @@ pub fn build_reactions() -> Reactions {
         |p: &mut Peripherals, args: &LuaList| -> InvResult {
             read_or_bail!([] = args);
             
-            let _screen: &crate::screen::Screen<90, 35> = &p.screen;
+            fn resolution<const W: usize, const H: usize>(
+                _: &crate::screen::Screen<W, H>
+            ) -> (usize, usize) {
+                (W, H)
+            }
+            
+            let (w, h) = resolution(&p.screen);
             Ok(vec![
-                Constant::Integer(90),
-                Constant::Integer(35),
+                Constant::Integer(w.try_into()?),
+                Constant::Integer(h.try_into()?),
             ])
         } as _
     );
